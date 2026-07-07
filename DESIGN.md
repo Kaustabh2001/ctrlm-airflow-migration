@@ -1,7 +1,29 @@
 # Control-M → Airflow (MWAA) Migration Converter — Design
 
-Status: draft v1 — 2026-07-06
-Decisions locked: **AWS MWAA target · generated Python DAGs · cluster-based DAG boundaries · one-time conversion**
+Status: **v3 — designed and implemented** (updated 2026-07-07; v1 draft 2026-07-06)
+Decisions locked: **AWS MWAA target · generated Python DAGs · one-time conversion · scope = one XML file per conversion (v2)**
+
+**DAG-boundary strategy — two implementations, decision deliberately open:**
+`strategy_components/` implements this document's §5 algorithm (connected
+components + principled cuts); `strategy_single_entry/` implements ownership
+propagation from roots (every DAG single-entry; spec in the final section of
+`docs/partition-algorithm.md`). Both run on every conversion and the comparison
+dashboard settles the default once real exports are available.
+
+**Doc map** (reading order for a new agent): `CLAUDE.md` (onboarding +
+commands) → this file (architecture + rationale) → `docs/partition-algorithm.md`
+(exact algorithm spec) → `docs/job-mapping-catalog.md` (job/param → Airflow
+mapping as implemented; test-synced to `core/ctrlm_core/operator_registry.py`)
+→ `docs/impl-contracts{,-v2,-v3}.md` (module contracts, accurate historical
+deltas) → `plugins/README.md` (the write-once `ctm_plugins` package).
+
+**Design-only — NOT yet implemented** (everything else in this doc is built):
+the standalone HTML gap report of §9 (diagnostics currently live in
+`partition.json` and the dashboard); the `cluster-map.yaml` pin/override
+read-back of §5 (the file is written as a report, but re-runs do not yet honor
+human edits); `overrides.yaml` (§6); validation levels L1/L3 of §8 (need
+`aws-mwaa-local-runner`); the calendar timetable runs on example data pending a
+real calendar export; RUN_AS credential policy (§6) is still an open decision.
 
 ---
 
@@ -44,26 +66,34 @@ XML exports ──► ingest ──► IR (typed, JSON-serializable)
                     validate + report DagBag import · graph equivalence · gap report (HTML/CSV)
 ```
 
-### Repo layout
+### Repo layout (as built)
 
 ```
 ctrlm-airflow-migration/
-├── src/ctrlm2af/
-│   ├── ingest/          # DEFTABLE XML parser → IR; dialect normalization (v8 TABLE/GROUP vs v9+ FOLDER/SUB_APPLICATION)
-│   ├── ir/              # Pydantic models: Folder, Job, Schedule, Condition, OnDoAction, Resource, Variable, Shout
-│   ├── analyze/         # condition graph, schedule normalizer, classifier, calendar resolver
-│   ├── partition/       # clustering + cut heuristics; reads/writes cluster-map.yaml
-│   ├── mapping/         # IR → Airflow model; rules driven by mapping-config/ + overrides.yaml
-│   ├── emit/            # Jinja2 codegen; black-formats output
-│   ├── report/          # inventory + gap report (HTML/CSV)
-│   └── cli.py           # Typer CLI: inventory · partition · generate · validate · report
-├── mapping-config/      # org-specific YAML: nodeid→conn, run_as policy, calendars, autoedit table, odate format
-├── templates/           # dag.py.j2 + per-operator snippets
-├── examples/exports/    # sample Control-M XML exports (input)
-├── build/               # intermediates: ir.json, graph.json, cluster-map.yaml, gap-report.html
-├── output/              # dags/, plugins/, requirements.txt, config manifests  ← deployable to MWAA
-└── tests/               # golden files (XML fixture → expected .py), DagBag import, equivalence checks
+├── core/ctrlm_core/          # shared core (pip-installed editable as ctrlm-core)
+│   ├── model.py              #   THE contract: typed IR + partition models
+│   ├── parser.py             #   DEFTABLE XML → IR (nested folders any depth, dialect-tolerant)
+│   ├── desugar.py            #   folder-level conds/vars → synthetic start/end nodes (recursive)
+│   ├── schedule.py           #   day-pattern normalization, ODATE clock, cron helpers
+│   ├── graph.py / cuts.py    #   condition matching → CtmGraph; shared cut phases
+│   ├── operator_registry.py  #   declarative job-type → operator registry (v3)
+│   ├── emit.py / templates/  #   Jinja2 + black codegen; full param mapping
+│   ├── stats.py / autoedit.py
+│   └── pipeline.py           #   per-XML-scope orchestration; scopes.json; pools.json
+├── strategy_components/      # strategy A: components + cuts (this doc §5)
+├── strategy_single_entry/    # strategy B: ownership propagation (single-entry DAGs)
+├── plugins/ctm_plugins/      # write-once custom components → MWAA plugins.zip
+├── dashboard/                # offline comparison dashboard (scope selector, 5 views)
+├── mapping-config/           # nodes.yaml (conn/os/type), notify.yaml, calendars.yaml
+├── examples/exports/         # 5 synthetic sample XMLs (tests assert their content)
+├── docs/                     # this file + algorithm spec + contracts + catalog
+├── scripts/run_all.ps1       # both strategies + dashboard in one command
+├── tests/                    # 285 tests; conftest.py puts repo root on sys.path
+└── output/<strategy>/<scope>/  # generated (gitignored): ir/graph/partition/dags/pools
 ```
+
+Each XML file is one **conversion scope** (v2): the pipeline above runs once per
+file; cross-file condition matches are reported in `scopes.json`, never wired.
 
 ### Tech stack
 
@@ -101,7 +131,7 @@ SMART folders and sub-folders carry their own scheduling criteria, in/out condit
 
 ### 4.1 Condition graph
 
-Global directed graph across **all** exported folders: node = job; edge = producer `OUTCOND(add)` → consumer `INCOND` matched on condition name + date qualifier. Only same-run `ODAT↔ODAT` matches become clustering edges; `PREV`-qualified in-conditions are cross-*run* dependencies and go straight to the wiring set as previous-run gates; `STAT`/literal-date qualifiers are flagged for review (they usually encode flags or locks, not dataflow).
+Directed graph spanning every folder **within one conversion scope** — since v2 one XML file (user decision; originally the whole export set): node = job; edge = producer `OUTCOND(add)` → consumer `INCOND` matched on condition name + date qualifier. Matches that would cross XML files are reported in `scopes.json` (`cross_scope_links`) and surface per scope as orphans — never silently wired, never silently dropped. Only same-run `ODAT↔ODAT` matches become clustering edges; `PREV`-qualified in-conditions are cross-*run* dependencies and go straight to the wiring set as previous-run gates; `STAT`/literal-date qualifiers are flagged for review (they usually encode flags or locks, not dataflow).
 
 Also recorded:
 - **Orphan in-conditions** — consumed but never produced in the export: either set externally (`ctmcontb`, other datacenters, manual ops) or the export is incomplete. Each needs a config decision: external-trigger (map to a Dataset a human/system updates), always-true, or error.
@@ -124,7 +154,14 @@ command / script-on-agent / dummy / file-watcher / database / cyclic / confirm-g
 
 ## 5. Partitioning: clusters → DAGs
 
-The locked decision: **DAG per dependency cluster** (connected component of the condition graph), not per folder. Folders are preserved *inside* DAGs as TaskGroups and tags, so teams keep their familiar grouping visually.
+This section specifies the **components strategy** (`strategy_components/`):
+DAG per dependency cluster (connected component of the condition graph), not
+per folder. Folders are preserved *inside* DAGs as TaskGroups and tags, so
+teams keep their familiar grouping visually. The alternative **single-entry
+strategy** (`strategy_single_entry/` — ownership propagation from roots;
+convergence points become new roots, every DAG has exactly one entry/anchor) is
+specified in the final section of `docs/partition-algorithm.md`; both run on
+every conversion for comparison.
 
 ### Algorithm
 
@@ -136,8 +173,9 @@ Inputs: the analyzed job set — each job carrying its normalized **day-pattern*
 4. **Apply manual cuts** listed in `cluster-map.yaml`.
 5. **Connected components** (union-find) of the undirected projection of the remaining edges = candidate DAGs. Jobs left with no edges (**singletons**) are coalesced into one DAG per (folder, day-pattern) group — otherwise unconditioned jobs would explode the DAG count. Manual merges are applied here (refused if day-patterns differ).
 6. **Resolve transitive conflicts** — a component can still hold two day-patterns connected through unscheduled middle jobs (daily → unscheduled → weekly), which step 3 cannot see. Compute the **minimum edge cut** (max-flow) between the two pattern groups — unscheduled middles are interior nodes and fall on whichever side minimizes severed edges. Move the cut edges to the wiring set, record them in `cluster-map.yaml` flagged `auto_resolved`, re-split, and repeat while any component holds more than one pattern (rarest group first; deterministic tie-breaks).
-7. **Size guardrail**: component > 150 tasks → generate anyway, but flag loudly with suggested further cuts (highest-betweenness condition edges) in the report.
-8. **Schedule + name**: the DAG's day-pattern is the component's (now unique) pattern, time-anchored at the earliest root TIMEFROM; later TIMEFROMs become time gates. Pattern-less components are Dataset-triggered. `dag_id` = snake_cased modal folder name (tie → lexicographic first; collision → deterministic numeric suffix).
+7. **Anchor purity** (run-context rule, implemented as kind `ANCHOR`): while a component's scheduled *roots* spread more than `anchor_spread_hours` (default 6) apart on the ODATE clock, min-cut the rarest anchor bucket away, same machinery as step 6. Roots at 21:00 and 23:00 share one overnight DAG; roots at 06:00 and 20:00 would stretch every run toward its schedule period and operationally couple unrelated chains — those split, wired back with sensors.
+8. **Size guardrail**: component > 150 tasks → generate anyway, but flag loudly with suggested further cuts (highest-betweenness condition edges) in the report.
+9. **Schedule + name**: the DAG's day-pattern is the component's (now unique) pattern, time-anchored at the earliest root TIMEFROM; later TIMEFROMs become time gates. Pattern-less components are Dataset-triggered. `dag_id` = snake_cased modal folder name (tie → lexicographic first; collision → deterministic numeric suffix; cross-scope collisions renamed `<scope>__<dag_id>` by the pipeline).
 
 The exact implementable form of this algorithm — pseudocode, invariants, and tie-break rules — is in `docs/partition-algorithm.md`.
 
@@ -157,7 +195,7 @@ For every cut or cross-cluster condition edge:
 
 ## 6. Mapping rules
 
-Driven by `mapping-config/` (environment facts) + `overrides.yaml` (per-job/folder exceptions: operator, connection, schedule, skip). Core table:
+**Implemented form (v3):** the declarative registry `core/ctrlm_core/operator_registry.py` (job-type rows, first-match, MANUAL catch-all stub) plus the per-task param mapping in `emit.py`; the authoritative user-facing version is `docs/job-mapping-catalog.md`, kept in sync with the registry by a test. The table below is the original design-level view (`overrides.yaml` is still design-only). Driven by `mapping-config/` (environment facts). Core table:
 
 | Control-M construct | Airflow / MWAA mechanism | Status |
 |---|---|---|
@@ -253,6 +291,14 @@ MWAA workers are ephemeral Fargate containers: **no business workload runs local
 | **P4 — Pilot & handoff** | One real cluster on staging MWAA (dry-run then live), bootstrap script, runbook, final gap report | Pilot signed off; conversion of remaining estate is mechanical |
 
 P0 is deliberately tiny and first: it validates every assumption in this document against the real exports before any mapping code exists.
+
+**Implementation status (2026-07-07):** the machinery of P0–P3 is built ahead of
+schedule against synthetic samples (parser + IR + graph + both partitioners +
+registry-driven emit + plugins package + comparison dashboard; 285 tests,
+deterministic). What remains is exactly the *real-data* half of each phase:
+running the parser against real exports (P0 exit), reviewing real cluster
+boundaries (P1 exit), the calendar export for the timetable, and the P4 pilot
+on staging MWAA with `aws-mwaa-local-runner` validation.
 
 ---
 

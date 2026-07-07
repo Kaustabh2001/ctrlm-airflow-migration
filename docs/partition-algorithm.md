@@ -1,8 +1,14 @@
 # Partition algorithm — exact specification
 
-The implementable form of DESIGN.md §5. Pseudocode is Python-ish; every iteration
-order is canonical (sorted) so the output is a pure function of
-`(export, config, cluster-map.yaml)`.
+The implementable form of DESIGN.md §5 — the **components strategy**
+(`strategy_components/partitioner.py`). The alternative **single-entry
+strategy** is specified in the final section of this file. Both operate on one
+**conversion scope** (since v2: one XML file — the pipeline runs this whole
+algorithm once per file). Pseudocode is Python-ish; every iteration order is
+canonical (sorted) so the output is a pure function of
+`(export, config, cluster-map.yaml)`. Note: `cluster-map.yaml` read-back
+(pins/manual cuts, Phase 4) is specified here but not yet wired in the
+implementation — the file is currently write-only output.
 
 ```python
 # ============================================================
@@ -134,6 +140,20 @@ while queue:
 
 clusters = final
 
+# ---------- Phase 6b: anchor purity (components strategy, kind=ANCHOR) ----------
+# Same worklist/min-cut machinery as Phase 6, applied to ROOT anchor times on
+# the ODATE clock instead of day-patterns:
+for C in clusters:
+    while max-min spread of {rel(r.timefrom or default) for scheduled roots r of C} \
+            > config.anchor_spread_hours * 60:
+        G_minor = roots in the rarest anchor bucket        # tie -> lexicographic
+        cut = MIN_EDGE_CUT(C, source=G_minor, sink=other scheduled roots)
+        move cut edges into W (kind=ANCHOR)
+        re-split C; re-check the parts
+# Rationale: roots at 21:00/23:00 = one overnight DAG; roots at 06:00/20:00
+# would stretch runs toward the schedule period and operationally couple
+# unrelated chains -> split, wired back with sensors.
+
 # ---------- Phase 7: size guardrail (report-only) ----------
 for C in clusters if len(C) > MAX_TASKS:
     warn(C, suggestions = top_k_edge_betweenness(C))
@@ -191,4 +211,36 @@ for (p, s, conds, kind) in dedupe(W, key=(p, s, kind)):   # cond names merged,
 
 ## Complexity
 
-Condition matching is a hash join over condition names (hub detection runs on counts before pair expansion, so broadcast conditions never materialize `fan_in × fan_out` edges). Components are union-find (near-linear). The only two nontrivial graph computations are confined: **min-cut** runs only on pattern-conflicted clusters (small, and terminals shrink the problem), and **edge betweenness** runs only on clusters exceeding `MAX_TASKS` — both off the hot path.
+Condition matching is a hash join over condition names (hub detection runs on counts before pair expansion, so broadcast conditions never materialize `fan_in × fan_out` edges). Components are union-find (near-linear). The only two nontrivial graph computations are confined: **min-cut** runs only on pattern/anchor-conflicted clusters (small, and terminals shrink the problem), and **edge betweenness** runs only on clusters exceeding `MAX_TASKS` — both off the hot path.
+
+## The single-entry strategy (alternative — `strategy_single_entry/partitioner.py`)
+
+Shares Phase −1 through Phase 2 exactly (folder desugaring, condition matching,
+cyclic extraction, hub cuts) and Phase 9 wiring rules; Phase 3 pattern cuts are
+NOT run — cadence is handled inside the ownership rule. In place of Phases 4–8:
+
+```python
+# Kahn topological order over directed e_edges; frontier is a lexicographic heap.
+for uid in kahn_order(nodes):
+    owners = sorted({owner[p] for p in predecessors(uid)})
+    if not owners:
+        owner[uid] = uid                       # root: no incoming e_edge
+    elif len(owners) >= 2:
+        owner[uid] = uid                       # convergence of two traversals -> NEW root
+    elif uid.day_pattern is not None and uid.day_pattern != owners[0].day_pattern:
+        owner[uid] = uid                       # own schedule differs from owner root
+                                               # (owner pattern None counts as mismatch)
+    else:
+        owner[uid] = owners[0]                 # continue the sole owner's traversal
+# e_edges crossing owners -> wiring set, kind OWNER_SPLIT
+# rootless condition cycles -> weakly-connected fallback groups (CYCLE_FALLBACK warn)
+# NO singleton coalescing (each loner job = its own DAG; count reported)
+# dag_id = snake_case(owner job name); synthetic folder-start owner -> folder name
+# schedule = owner root's day_pattern + timefrom anchor; pattern-less -> dataset-triggered
+```
+
+Guarantee: every DAG is single-entry — exactly one root, one unambiguous anchor
+(stats show zero multi-root DAGs). Trade-off vs components: strictly more DAGs
+and more cross-DAG links (every convergence and every loner splits), in exchange
+for per-chain operational independence. The comparison dashboard quantifies
+both on real data.
