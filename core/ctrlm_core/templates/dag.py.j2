@@ -1,0 +1,22 @@
+"""
+{{ docstring }}
+"""
+{% for imp in imports %}
+{{ imp }}
+{% endfor %}
+
+{% if prelude %}
+
+{{ prelude }}
+
+{% endif %}
+
+with DAG(
+    dag_id="{{ dag_id }}",
+    start_date=datetime(2026, 1, 1),
+    catchup=False,
+    schedule={{ schedule_repr }},
+    default_args={"retries": {{ retries }}},
+    tags={{ tags_repr }},
+) as dag:
+{{ body }}

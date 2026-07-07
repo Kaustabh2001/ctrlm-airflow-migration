@@ -1,0 +1,31 @@
+# Control-M calendar date lists (used by ctm_plugins.timetables.CtmCalendarTimetable).
+#
+# Schema: {calendar_name: ["YYYY-MM-DD", ...]}
+# The timetable fires the DAG at its anchor time (HHMM, UTC) on exactly the
+# listed dates and nothing else. Export each Control-M periodic calendar's
+# resolved dates here (e.g. via `ctm deploy calendars::get`).
+#
+# Override the file location at runtime with env var CTM_CALENDARS_CONFIG.
+#
+# Example: banking business days (weekdays minus exchange holidays), Jan 2026.
+BANK_BUS_DAYS:
+  - "2026-01-02"
+  - "2026-01-05"
+  - "2026-01-06"
+  - "2026-01-07"
+  - "2026-01-08"
+  - "2026-01-09"
+  - "2026-01-12"
+  - "2026-01-13"
+  - "2026-01-14"
+  - "2026-01-15"
+  - "2026-01-16"
+  - "2026-01-20"   # 2026-01-19 skipped: holiday
+  - "2026-01-21"
+  - "2026-01-22"
+  - "2026-01-23"
+  - "2026-01-26"
+  - "2026-01-27"
+  - "2026-01-28"
+  - "2026-01-29"
+  - "2026-01-30"

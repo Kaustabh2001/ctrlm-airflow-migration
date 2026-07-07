@@ -1,0 +1,15 @@
+# local environment
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+core/ctrlm_core.egg-info/
+core/build/
+
+# generated conversion outputs (reproducible via scripts/run_all.ps1)
+output/
+
+# personal / local-only
+.claude/settings.local.json
+session.txt
+scratch/

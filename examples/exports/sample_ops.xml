@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DEFTABLE>
+  <FOLDER FOLDER_NAME="OPS" DATACENTER="CTM_PROD">
+    <JOB JOBNAME="OPS_OPEN_BATCH" DESCRIPTION="Open the nightly batch window" APPLICATION="OPS"
+         SUB_APPLICATION="BATCH" TASKTYPE="Command" CMDLINE="/opt/ops/open_batch.sh %%ODATE"
+         NODEID="opsagent01" RUN_AS="opsbatch" WEEKDAYS="ALL" TIMEFROM="2000">
+      <OUTCOND NAME="BATCH-OPEN" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <JOB JOBNAME="OPS_APP01" DESCRIPTION="Nightly app job 01" APPLICATION="OPS" SUB_APPLICATION="APPS"
+         TASKTYPE="Command" CMDLINE="/opt/ops/run_app.sh %%JOBNAME" NODEID="opsagent01"
+         RUN_AS="opsbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="2100">
+      <INCOND NAME="BATCH-OPEN" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+    <JOB JOBNAME="OPS_APP02" DESCRIPTION="Nightly app job 02" APPLICATION="OPS" SUB_APPLICATION="APPS"
+         TASKTYPE="Command" CMDLINE="/opt/ops/run_app.sh %%JOBNAME" NODEID="opsagent01"
+         RUN_AS="opsbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="2100">
+      <INCOND NAME="BATCH-OPEN" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+    <JOB JOBNAME="OPS_APP03" DESCRIPTION="Nightly app job 03" APPLICATION="OPS" SUB_APPLICATION="APPS"
+         TASKTYPE="Command" CMDLINE="/opt/ops/run_app.sh %%JOBNAME" NODEID="opsagent01"
+         RUN_AS="opsbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="2100">
+      <INCOND NAME="BATCH-OPEN" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+    <JOB JOBNAME="OPS_APP04" DESCRIPTION="Nightly app job 04" APPLICATION="OPS" SUB_APPLICATION="APPS"
+         TASKTYPE="Command" CMDLINE="/opt/ops/run_app.sh %%JOBNAME" NODEID="opsagent01"
+         RUN_AS="opsbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="2100">
+      <INCOND NAME="BATCH-OPEN" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+    <JOB JOBNAME="OPS_APP05" DESCRIPTION="Nightly app job 05" APPLICATION="OPS" SUB_APPLICATION="APPS"
+         TASKTYPE="Command" CMDLINE="/opt/ops/run_app.sh %%JOBNAME" NODEID="opsagent01"
+         RUN_AS="opsbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="2100">
+      <INCOND NAME="BATCH-OPEN" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+    <JOB JOBNAME="OPS_APP06" DESCRIPTION="Nightly app job 06" APPLICATION="OPS" SUB_APPLICATION="APPS"
+         TASKTYPE="Command" CMDLINE="/opt/ops/run_app.sh %%JOBNAME" NODEID="opsagent01"
+         RUN_AS="opsbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="2100">
+      <INCOND NAME="BATCH-OPEN" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+    <JOB JOBNAME="OPS_APP07" DESCRIPTION="Nightly app job 07" APPLICATION="OPS" SUB_APPLICATION="APPS"
+         TASKTYPE="Command" CMDLINE="/opt/ops/run_app.sh %%JOBNAME" NODEID="opsagent01"
+         RUN_AS="opsbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="2100">
+      <INCOND NAME="BATCH-OPEN" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+    <JOB JOBNAME="OPS_APP08" DESCRIPTION="Nightly app job 08" APPLICATION="OPS" SUB_APPLICATION="APPS"
+         TASKTYPE="Command" CMDLINE="/opt/ops/run_app.sh %%JOBNAME" NODEID="opsagent01"
+         RUN_AS="opsbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="2100">
+      <INCOND NAME="BATCH-OPEN" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+    <JOB JOBNAME="OPS_APP09" DESCRIPTION="Nightly app job 09" APPLICATION="OPS" SUB_APPLICATION="APPS"
+         TASKTYPE="Command" CMDLINE="/opt/ops/run_app.sh %%JOBNAME" NODEID="opsagent01"
+         RUN_AS="opsbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="2100">
+      <INCOND NAME="BATCH-OPEN" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+    <JOB JOBNAME="OPS_APP10" DESCRIPTION="Nightly app job 10" APPLICATION="OPS" SUB_APPLICATION="APPS"
+         TASKTYPE="Command" CMDLINE="/opt/ops/run_app.sh %%JOBNAME" NODEID="opsagent01"
+         RUN_AS="opsbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="2100">
+      <INCOND NAME="BATCH-OPEN" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+    <JOB JOBNAME="OPS_FS_POLL" DESCRIPTION="Poll landing zone for inbound files" APPLICATION="OPS"
+         SUB_APPLICATION="FILES" TASKTYPE="Command" CMDLINE="/opt/ops/fs_poll.sh"
+         NODEID="opsagent02" RUN_AS="opsbatch" CYCLIC="1" INTERVAL="15M" TIMEFROM="0600" TIMETO="2000">
+      <OUTCOND NAME="FILE-ARRIVED" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+  </FOLDER>
+  <FOLDER FOLDER_NAME="STG" DATACENTER="CTM_PROD">
+    <JOB JOBNAME="STG_INGEST" DESCRIPTION="Ingest arrived files into staging" APPLICATION="STG"
+         SUB_APPLICATION="LOAD" TASKTYPE="Command" CMDLINE="/opt/stg/ingest.sh %%ODATE"
+         NODEID="stgagent01" RUN_AS="stgbatch">
+      <INCOND NAME="FILE-ARRIVED" ODATE="ODAT" AND_OR="AND"/>
+      <OUTCOND NAME="STG-LOADED" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <JOB JOBNAME="STG_QUALITY" DESCRIPTION="Run staging data quality checks" APPLICATION="STG"
+         SUB_APPLICATION="LOAD" TASKTYPE="Command" CMDLINE="/opt/stg/quality_checks.sh %%ODATE"
+         NODEID="stgagent01" RUN_AS="stgbatch">
+      <INCOND NAME="STG-LOADED" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+  </FOLDER>
+</DEFTABLE>

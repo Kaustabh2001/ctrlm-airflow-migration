@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DEFTABLE>
+  <FOLDER FOLDER_NAME="MFG_IN" DATACENTER="CTM_PROD">
+    <JOB JOBNAME="MFG_SENSORS" DESCRIPTION="Watch for plant sensor snapshot" APPLICATION="MFG"
+         SUB_APPLICATION="INBOUND" TASKTYPE="FileWatch" MEMLIB="/data/mfg/incoming"
+         MEMNAME="plant_sensors.csv" NODEID="mfgagent01" RUN_AS="mfgbatch"
+         WEEKDAYS="ALL" TIMEFROM="0500">
+      <OUTCOND NAME="MFG-PLANT-READY" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+  </FOLDER>
+  <SMART_FOLDER FOLDER_NAME="MFG_NIGHT" DATACENTER="CTM_PROD" WEEKDAYS="ALL">
+    <INCOND NAME="MFG-PLANT-READY" ODATE="ODAT" AND_OR="AND"/>
+    <OUTCOND NAME="MFG-NIGHT-DONE" ODATE="ODAT" SIGN="ADD"/>
+    <JOB JOBNAME="MFG_EXTRACT" DESCRIPTION="Extract MES production data" APPLICATION="MFG"
+         SUB_APPLICATION="NIGHT" TASKTYPE="Command" CMDLINE="/opt/mfg/extract.sh %%ODATE"
+         NODEID="prdnode2" RUN_AS="mfgbatch" TIMEFROM="2100">
+      <OUTCOND NAME="MFG-EXTRACTED" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <SUB_FOLDER FOLDER_NAME="PRESS_SHOP">
+      <INCOND NAME="MFG-EXTRACTED" ODATE="ODAT" AND_OR="AND"/>
+      <JOB JOBNAME="PRESS_LOAD" DESCRIPTION="Load press-shop output" APPLICATION="MFG"
+           SUB_APPLICATION="PRESS" TASKTYPE="Command"
+           CMDLINE="powershell -File C:\jobs\press_load.ps1 %%ODATE"
+           NODEID="winnode1" RUN_AS="mfgbatch">
+        <OUTCOND NAME="PRESS-LOADED" ODATE="ODAT" SIGN="ADD"/>
+      </JOB>
+      <JOB JOBNAME="PRESS_REPORT" DESCRIPTION="Press-shop shift report" APPLICATION="MFG"
+           SUB_APPLICATION="PRESS" TASKTYPE="Job" MEMNAME="press_report.ps1" MEMLIB="C:\jobs"
+           NODEID="winnode1" RUN_AS="mfgbatch">
+        <INCOND NAME="PRESS-LOADED" ODATE="ODAT" AND_OR="AND"/>
+      </JOB>
+      <SUB_FOLDER FOLDER_NAME="QA">
+        <JOB JOBNAME="QA_CHECK" DESCRIPTION="Quality gate on press output" APPLICATION="MFG"
+             SUB_APPLICATION="QA" TASKTYPE="Command"
+             CMDLINE="powershell -File C:\jobs\qa_check.ps1"
+             NODEID="winnode1" RUN_AS="mfgbatch"/>
+      </SUB_FOLDER>
+    </SUB_FOLDER>
+  </SMART_FOLDER>
+</DEFTABLE>

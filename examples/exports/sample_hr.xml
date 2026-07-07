@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DEFTABLE>
+  <FOLDER FOLDER_NAME="HR_IN" DATACENTER="CTM_PROD">
+    <JOB JOBNAME="HR_FW" DESCRIPTION="Watch for inbound payroll file" APPLICATION="HR"
+         SUB_APPLICATION="INBOUND" TASKTYPE="FileWatch" MEMLIB="/data/hr/incoming"
+         MEMNAME="payroll_input.csv" NODEID="hragent01" RUN_AS="hrbatch"
+         WEEKDAYS="ALL" TIMEFROM="0700">
+      <OUTCOND NAME="HR-FILES-READY" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <JOB JOBNAME="HR_EXT_FEED_CHECK" DESCRIPTION="Validate external benefits feed" APPLICATION="HR"
+         SUB_APPLICATION="INBOUND" TASKTYPE="Command" CMDLINE="/opt/hr/check_ext_feed.sh %%ODATE"
+         NODEID="hragent01" RUN_AS="hrbatch">
+      <INCOND NAME="EXT-FEED-OK" ODATE="ODAT" AND_OR="AND"/>
+      <OUTCOND NAME="HR-STALE-LOCK" ODATE="ODAT" SIGN="DEL"/>
+    </JOB>
+  </FOLDER>
+  <SMART_FOLDER FOLDER_NAME="HR_PAY" DATACENTER="CTM_PROD" DAYS="1,15">
+    <INCOND NAME="HR-FILES-READY" ODATE="ODAT" AND_OR="AND"/>
+    <OUTCOND NAME="HR-PAY-DONE" ODATE="ODAT" SIGN="ADD"/>
+    <JOB JOBNAME="HR_CALC" DESCRIPTION="Calculate payroll" APPLICATION="HR" SUB_APPLICATION="PAYROLL"
+         TASKTYPE="Command" CMDLINE="/opt/hr/calc_payroll.sh %%ODATE" NODEID="hragent01" RUN_AS="hrbatch">
+      <INCOND NAME="HR-PAY-DONE" ODATE="PREV" AND_OR="AND"/>
+      <OUTCOND NAME="HR-CALC-OK" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <JOB JOBNAME="HR_PAY_RUN" DESCRIPTION="Execute payroll payments run" APPLICATION="HR"
+         SUB_APPLICATION="PAYROLL" TASKTYPE="Command" CMDLINE="/opt/hr/pay_run.sh %%ODATE"
+         NODEID="hragent01" RUN_AS="hrbatch" CONFIRM="1" MAXRERUN="1">
+      <INCOND NAME="HR-CALC-OK" ODATE="ODAT" AND_OR="AND"/>
+      <QUANTITATIVE NAME="DB_SLOTS" QUANT="2"/>
+      <ON STMT="*" CODE="NOTOK">
+        <DOMAIL DEST="hr-ops@example.com" SUBJECT="HR payroll run failed" MESSAGE="HR_PAY_RUN ended NOTOK"/>
+      </ON>
+      <OUTCOND NAME="HR-PAY-OK" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <JOB JOBNAME="HR_REPORT" DESCRIPTION="Produce payroll report" APPLICATION="HR"
+         SUB_APPLICATION="PAYROLL" TASKTYPE="Command" CMDLINE="/opt/hr/pay_report.sh %%ODATE"
+         NODEID="hragent01" RUN_AS="hrbatch">
+      <INCOND NAME="HR-PAY-OK" ODATE="ODAT" AND_OR="AND"/>
+      <SHOUT WHEN="NOTOK" DEST="EM" MESSAGE="HR payroll report failed"/>
+    </JOB>
+  </SMART_FOLDER>
+</DEFTABLE>

@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Control-M &rarr; Airflow migration dashboard</title>
+<style>
+  :root {
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #232322;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --hair: #2c2c2a;
+    --ring: rgba(255, 255, 255, 0.10);
+    --accent: #3987e5;
+    --series-a: #3987e5;   /* components */
+    --series-b: #d95926;   /* single-entry */
+    --warn: #fab219;
+    --error: #d03b3b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    overflow: hidden;
+  }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+
+  header {
+    display: flex; align-items: center; gap: 18px;
+    padding: 10px 16px; border-bottom: 1px solid var(--hair);
+    background: var(--surface); flex-wrap: wrap;
+  }
+  .brand h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.01em; }
+  .brand .sub { font-size: 11px; color: var(--muted); }
+  nav#tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+  .tab {
+    appearance: none; border: 1px solid transparent; background: transparent;
+    color: var(--ink-2); font: inherit; font-size: 13px;
+    padding: 6px 12px; border-radius: 7px; cursor: pointer;
+  }
+  .tab:hover { background: var(--surface-2); color: var(--ink); }
+  .tab.active {
+    background: var(--surface-2); color: var(--ink);
+    border-color: var(--ring); box-shadow: inset 0 -2px 0 var(--accent);
+  }
+  .scopewrap {
+    display: flex; align-items: center; gap: 7px; margin-left: auto;
+    font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+  }
+  #scope-select {
+    background: var(--page); color: var(--ink);
+    border: 1px solid var(--hair); border-radius: 7px;
+    padding: 6px 8px; font: inherit; font-size: 13px;
+    text-transform: none; letter-spacing: normal; font-weight: 400;
+    max-width: 220px;
+  }
+  #scope-select:focus { outline: none; border-color: var(--accent); }
+  #search {
+    width: 200px;
+    background: var(--page); color: var(--ink);
+    border: 1px solid var(--hair); border-radius: 7px;
+    padding: 6px 10px; font: inherit; font-size: 13px;
+  }
+  #search:focus { outline: none; border-color: var(--accent); }
+  #search::placeholder { color: var(--muted); }
+
+  main { flex: 1; position: relative; min-height: 0; }
+  .view { position: absolute; inset: 0; display: none; }
+  .view.active { display: flex; }
+  #view-compare.active, #view-run.active { display: block; overflow: auto; }
+
+  .graph-view .canvas { flex: 1; min-width: 0; background: var(--page); }
+  .graph-view .legend {
+    width: 270px; flex: none; overflow-y: auto;
+    border-left: 1px solid var(--hair); background: var(--surface);
+    padding: 12px 14px;
+  }
+  .legend h2 {
+    font-size: 11px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.06em; margin: 10px 0 6px;
+  }
+  .legend h2:first-child { margin-top: 0; }
+  .lrow {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 4px; border-radius: 6px; font-size: 12.5px; color: var(--ink-2);
+  }
+  .lrow.clickable { cursor: pointer; }
+  .lrow.clickable:hover { background: var(--surface-2); color: var(--ink); }
+  .chip { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .chip-line { width: 18px; height: 3px; border-radius: 2px; flex: none; }
+  .lname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lcount { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11.5px; }
+  .lnote { font-size: 11px; color: var(--muted); margin: 2px 0 0 22px; }
+  .badge {
+    font-size: 10px; color: var(--muted); border: 1px solid var(--hair);
+    border-radius: 4px; padding: 0 4px; flex: none;
+  }
+
+  /* vis-network tooltip (the JS toggles visibility; we supply the skin) */
+  div.vis-tooltip {
+    position: absolute; visibility: hidden; pointer-events: none; z-index: 6;
+    white-space: pre-line; max-width: 360px;
+    background: var(--surface-2); color: var(--ink-2);
+    border: 1px solid var(--ring); border-radius: 8px;
+    padding: 8px 10px; font: 12px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  }
+  div.vis-tooltip::first-line { color: var(--ink); font-weight: 600; }
+
+  /* ---------------- comparison + run views ---------------- */
+  #compare-content, #run-content { max-width: 1080px; margin: 0 auto; padding: 22px 24px 60px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--hair);
+    border-radius: 10px; padding: 16px 18px; margin-bottom: 18px;
+  }
+  .card h2 { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+  .card .hint { font-size: 12px; color: var(--muted); margin: -6px 0 10px; }
+  table.ctable { border-collapse: collapse; width: 100%; font-size: 13px; }
+  table.ctable th {
+    text-align: left; font-size: 10.5px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 6px 10px; border-bottom: 1px solid var(--hair);
+  }
+  table.ctable td {
+    padding: 6px 10px; border-bottom: 1px solid var(--hair);
+    color: var(--ink-2); vertical-align: top;
+  }
+  table.ctable tr:last-child td { border-bottom: none; }
+  table.ctable td.num, table.ctable th.num {
+    text-align: right; font-variant-numeric: tabular-nums;
+  }
+  table.ctable td.metric { color: var(--ink); }
+  .tablewrap { overflow-x: auto; }
+
+  .serieskey { display: flex; gap: 16px; font-size: 12px; color: var(--ink-2); margin-bottom: 10px; }
+  .serieskey .chip { border-radius: 3px; width: 10px; height: 10px; }
+
+  .histo { display: grid; grid-template-columns: 64px 1fr; row-gap: 10px; align-items: center; }
+  .histo .blabel { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .hbars { display: flex; flex-direction: column; gap: 2px; }
+  .hbar { display: flex; align-items: center; gap: 8px; height: 14px; }
+  .hfill { height: 100%; border-radius: 0 4px 4px 0; min-width: 2px; }
+  .hfill.a { background: var(--series-a); }
+  .hfill.b { background: var(--series-b); }
+  .hval { font-size: 11.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+  .pill {
+    display: inline-block; margin: 1px 4px 1px 0; padding: 1px 7px;
+    border: 1px solid var(--hair); border-radius: 999px;
+    font-size: 11.5px; color: var(--ink-2); background: var(--page);
+    font-variant-numeric: tabular-nums;
+  }
+  td .split-warn { color: var(--warn); }
+  .scopetag {
+    display: inline-block; padding: 0 7px; border-radius: 999px;
+    border: 1px solid var(--hair); background: var(--page);
+    font-size: 11.5px; color: var(--ink);
+  }
+  td.filecell { font-size: 12px; color: var(--muted); word-break: break-all; }
+
+  .diaggrid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .diaggrid { grid-template-columns: 1fr; } }
+  .diagcol h3 { font-size: 12px; font-weight: 600; color: var(--ink-2); margin-bottom: 8px; }
+  ul.diaglist { list-style: none; }
+  ul.diaglist li {
+    font-size: 12.5px; color: var(--ink-2); padding: 5px 0;
+    border-bottom: 1px solid var(--hair);
+  }
+  ul.diaglist li:last-child { border-bottom: none; }
+  .lvl {
+    display: inline-block; font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em;
+    border: 1px solid var(--hair); border-radius: 4px;
+    padding: 0 5px; margin-right: 7px; color: var(--muted);
+  }
+  .lvl.warn { color: var(--warn); border-color: var(--warn); }
+  .lvl.error { color: var(--error); border-color: var(--error); }
+  .code { color: var(--ink); font-weight: 600; margin-right: 6px; }
+  .subj { color: var(--muted); }
+  .empty { color: var(--muted); font-size: 12.5px; font-style: italic; }
+</style>
+<script>/* vis-network (inlined from the local pyvis package; no CDN) */
+@@VIS_JS@@
+</script>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand">
+      <h1>Control-M &rarr; Airflow migration</h1>
+      <div class="sub">DAG partitioning &mdash; components vs single-entry</div>
+    </div>
+    <nav id="tabs">
+      <button class="tab active" data-view="structure">Control-M structure</button>
+      <button class="tab" data-view="components">Components strategy</button>
+      <button class="tab" data-view="single">Single-entry strategy</button>
+      <button class="tab" data-view="full">Condition graph</button>
+      <button class="tab" data-view="compare">Comparison</button>
+      <button class="tab" data-view="run">Run overview</button>
+    </nav>
+    <label class="scopewrap" for="scope-select">Scope
+      <select id="scope-select" title="Conversion scope (one per input XML file)"></select>
+    </label>
+    <input id="search" type="search" placeholder="Search jobs&hellip;" autocomplete="off">
+  </header>
+  <main>
+    <section id="view-structure" class="view graph-view active">
+      <div class="canvas" id="net-structure"></div>
+      <aside class="legend" id="legend-structure"></aside>
+    </section>
+    <section id="view-components" class="view graph-view">
+      <div class="canvas" id="net-components"></div>
+      <aside class="legend" id="legend-components"></aside>
+    </section>
+    <section id="view-single" class="view graph-view">
+      <div class="canvas" id="net-single"></div>
+      <aside class="legend" id="legend-single"></aside>
+    </section>
+    <section id="view-full" class="view graph-view">
+      <div class="canvas" id="net-full"></div>
+      <aside class="legend" id="legend-full"></aside>
+    </section>
+    <section id="view-compare" class="view">
+      <div id="compare-content"></div>
+    </section>
+    <section id="view-run" class="view">
+      <div id="run-content"></div>
+    </section>
+  </main>
+</div>
+
+<script id="ctm-data" type="application/json">@@DATA_JSON@@</script>
+
+<script>
+(function () {
+  'use strict';
+
+  var DATA = JSON.parse(document.getElementById('ctm-data').textContent);
+
+  var INK2 = '#c3c2b7';
+  var EDGE_NEUTRAL = '#6f6f69';
+  var UNASSIGNED = '#55554f';
+  /* dark-surface categorical slots (validated dataviz palette) */
+  var PALETTE = ['#3987e5', '#199e70', '#c98500', '#008300',
+                 '#9085e9', '#e66767', '#d55181', '#d95926'];
+  var KIND_COLORS = {
+    'E': EDGE_NEUTRAL,
+    'PREV_RUN': '#9085e9',
+    'REVIEW': '#e66767',
+    'CYCLIC': '#c98500',
+    'HUB': '#d95926',
+    'PATTERN': '#3987e5',
+    'MANUAL': '#e8e7e0',
+    'AUTO_RESOLVED': '#199e70',
+    'ANCHOR': '#d55181',
+    'OWNER_SPLIT': '#008300'
+  };
+
+  function kindColor(k) { return KIND_COLORS[k] || '#8a8a84'; }
+
+  function colorAt(i) {
+    if (i < PALETTE.length) { return PALETTE[i]; }
+    /* deterministic golden-angle fallback beyond the 8 validated slots */
+    var hue = (i * 137.508) % 360;
+    return 'hsl(' + hue.toFixed(1) + ', 52%, 60%)';
+  }
+
+  function categoryColors(values) {
+    var m = {};
+    values.forEach(function (v, i) { m[v] = colorAt(i); });
+    return m;
+  }
+
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  /* ---------------- per-scope state (v2: scope = one XML file) ---------- */
+
+  var currentScope = DATA.scopes[0];
+  var S = null;          /* DATA.per_scope[currentScope] */
+  var nodeInfo = {};
+  var degree = {};
+  var built = {};        /* view -> {net, nodes DataSet, base node array} */
+
+  function computeScopeState() {
+    S = DATA.per_scope[currentScope];
+    nodeInfo = {};
+    S.nodes.forEach(function (n) { nodeInfo[n.id] = n; });
+    degree = {};
+    function bump(id) { degree[id] = (degree[id] || 0) + 1; }
+    S.e_edges.forEach(function (e) { bump(e.source); bump(e.target); });
+    S.w_edges.forEach(function (e) { bump(e.source); bump(e.target); });
+  }
+
+  function tooltip(n) {
+    var lines = [n.id];
+    lines.push('scope: ' + currentScope);
+    lines.push('folder: ' + n.folder + (n.synthetic ? '  (synthetic)' : ''));
+    lines.push('type: ' + n.task_type + (n.cyclic ? '  · cyclic' : ''));
+    lines.push('day pattern: ' + (n.day_pattern || 'condition-driven'));
+    if (n.timefrom) { lines.push('timefrom: ' + n.timefrom); }
+    lines.push('dag (components): ' + (n.dag_a || '—'));
+    lines.push('dag (single-entry): ' + (n.dag_b || '—'));
+    return lines.join('\n');
+  }
+
+  function makeNodes(keyFn, colorMap) {
+    return S.nodes.map(function (n) {
+      var key = keyFn(n);
+      var c = (key !== null && key !== undefined && colorMap[key]) || UNASSIGNED;
+      return {
+        id: n.id,
+        label: n.name,
+        title: tooltip(n),
+        shape: n.cyclic ? 'hexagon' : (n.synthetic ? 'diamond' : 'dot'),
+        size: 7 + Math.min(11, degree[n.id] || 0),
+        borderWidth: 1,
+        opacity: 1,
+        color: {
+          background: c, border: c,
+          highlight: { background: c, border: '#ffffff' },
+          hover: { background: c, border: '#ffffff' }
+        },
+        font: { color: INK2, size: 11, face: 'system-ui', strokeWidth: 0 }
+      };
+    });
+  }
+
+  function edgeObj(from, to, opts) {
+    return {
+      from: from, to: to,
+      arrows: { to: { enabled: true, scaleFactor: 0.5 } },
+      dashes: !!opts.dashed,
+      width: opts.dashed ? 1.6 : 1,
+      color: {
+        color: opts.color, opacity: opts.dashed ? 0.95 : 0.55,
+        highlight: '#ffffff', hover: '#ffffff'
+      },
+      title: opts.title,
+      smooth: { enabled: true, type: 'dynamic' }
+    };
+  }
+
+  /* ---------------- legends ---------------- */
+
+  function legendEl(view) { return document.getElementById('legend-' + view); }
+
+  function lrow(color, name, count, extra) {
+    return '<div class="lrow' + (extra && extra.click ? ' clickable" data-sel="' + esc(extra.click) + '"' : '"') + '>'
+      + '<span class="' + (extra && extra.line ? 'chip-line' : 'chip') + '" style="background:' + color + '"></span>'
+      + '<span class="lname" title="' + esc(name) + '">' + esc(name) + '</span>'
+      + (extra && extra.badge ? '<span class="badge">' + esc(extra.badge) + '</span>' : '')
+      + (count !== null && count !== undefined ? '<span class="lcount">' + esc(count) + '</span>' : '')
+      + '</div>';
+  }
+
+  function renderFolderLegend(view, cmap) {
+    var html = '<h2>Folders</h2>';
+    S.folders.forEach(function (f) {
+      html += lrow(cmap[f.name] || UNASSIGNED, f.name, f.n_jobs + ' jobs',
+        { badge: (f.smart ? 'smart' : null), click: 'folder:' + f.name });
+      if (f.datacenter) { html += '<div class="lnote">' + esc(f.datacenter) + '</div>'; }
+    });
+    html += '<h2>Edges</h2>' + lrow(EDGE_NEUTRAL, 'condition (E)', S.e_edges.length, { line: true });
+    legendEl(view).innerHTML = html;
+  }
+
+  function renderDagLegend(view, strat, cmap, dagKey) {
+    var html = '<h2>DAGs (' + strat.dags.length + ') — ' + esc(strat.strategy) + '</h2>';
+    strat.dags.forEach(function (d) {
+      var sched = d.dataset_triggered ? 'dataset-triggered'
+        : (d.schedule ? d.schedule : 'no schedule');
+      html += lrow(cmap[d.dag_id], d.dag_id, d.n_jobs, { click: dagKey + ':' + d.dag_id });
+      html += '<div class="lnote">' + esc(sched) + '</div>';
+    });
+    html += '<h2>Cross-DAG links (' + strat.cross_links.length + ')</h2>';
+    var kinds = {};
+    strat.cross_links.forEach(function (c) { kinds[c.kind] = (kinds[c.kind] || 0) + 1; });
+    Object.keys(kinds).sort().forEach(function (k) {
+      html += lrow(kindColor(k), k, kinds[k], { line: true });
+    });
+    if (strat.cross_links.length === 0) { html += '<div class="empty">none</div>'; }
+    legendEl(view).innerHTML = html;
+  }
+
+  function renderKindLegend(view, kindCounts) {
+    var html = '<h2>Edge kinds</h2>';
+    Object.keys(kindCounts).sort().forEach(function (k) {
+      html += lrow(kindColor(k), k, kindCounts[k], { line: true });
+    });
+    html += '<h2>Review lists</h2>';
+    html += lrow('#e66767', 'orphan conditions', S.orphan_conds.length, { line: true });
+    S.orphan_conds.slice(0, 12).forEach(function (o) {
+      html += '<div class="lnote">' + esc(o.cond) + '</div>';
+    });
+    html += lrow('#c98500', 'dead-end conditions', S.dead_end_conds.length, { line: true });
+    S.dead_end_conds.slice(0, 12).forEach(function (o) {
+      html += '<div class="lnote">' + esc(o.cond) + '</div>';
+    });
+    legendEl(view).innerHTML = html;
+  }
+
+  /* ---------------- view builders ---------------- */
+
+  function dagA(n) { return n.dag_a; }
+  function dagB(n) { return n.dag_b; }
+
+  function buildStructure() {
+    var cmap = categoryColors(S.folders.map(function (f) { return f.name; }));
+    var edges = S.e_edges.map(function (e) {
+      return edgeObj(e.source, e.target,
+        { color: EDGE_NEUTRAL, title: 'E — ' + e.conds.join(', ') });
+    });
+    renderFolderLegend('structure', cmap);
+    return { nodes: makeNodes(function (n) { return n.folder; }, cmap), edges: edges };
+  }
+
+  function buildStrategy(view, strat, keyFn, dagKey) {
+    var cmap = categoryColors(strat.dags.map(function (d) { return d.dag_id; }));
+    var edges = [];
+    S.e_edges.forEach(function (e) {
+      var a = nodeInfo[e.source], b = nodeInfo[e.target];
+      if (!a || !b) { return; }
+      var da = keyFn(a), db = keyFn(b);
+      if (da && da === db) {
+        edges.push(edgeObj(e.source, e.target,
+          { color: EDGE_NEUTRAL, title: 'intra-DAG — ' + e.conds.join(', ') }));
+      }
+    });
+    strat.cross_links.forEach(function (c) {
+      if (!nodeInfo[c.source] || !nodeInfo[c.target]) { return; }
+      edges.push(edgeObj(c.source, c.target, {
+        color: kindColor(c.kind), dashed: true,
+        title: 'cross-DAG ' + c.kind + ' via ' + c.mechanism + ' — ' + c.conds.join(', ')
+      }));
+    });
+    renderDagLegend(view, strat, cmap, dagKey);
+    return { nodes: makeNodes(keyFn, cmap), edges: edges };
+  }
+
+  function buildFull() {
+    var cmap = categoryColors(S.folders.map(function (f) { return f.name; }));
+    var kindCounts = {};
+    var edges = [];
+    function add(e, dashed) {
+      kindCounts[e.kind] = (kindCounts[e.kind] || 0) + 1;
+      edges.push(edgeObj(e.source, e.target, {
+        color: kindColor(e.kind), dashed: dashed,
+        title: e.kind + ' — ' + e.conds.join(', ')
+      }));
+    }
+    S.e_edges.forEach(function (e) { add(e, false); });
+    S.w_edges.forEach(function (e) { add(e, true); });
+    renderKindLegend('full', kindCounts);
+    return { nodes: makeNodes(function (n) { return n.folder; }, cmap), edges: edges };
+  }
+
+  /* ---------------- networks: build lazily per scope, freeze on settle -- */
+
+  function netOptions(nNodes) {
+    return {
+      autoResize: true,
+      layout: { randomSeed: 7, improvedLayout: nNodes <= 200 },
+      interaction: { hover: true, tooltipDelay: 120, hideEdgesOnDrag: true, multiselect: true },
+      physics: {
+        enabled: true,
+        solver: 'forceAtlas2Based',
+        forceAtlas2Based: {
+          gravitationalConstant: -46, centralGravity: 0.008,
+          springLength: 110, springConstant: 0.06, avoidOverlap: 0.4
+        },
+        maxVelocity: 40, minVelocity: 0.75,
+        stabilization: { enabled: true, iterations: 250, updateInterval: 30 }
+      },
+      nodes: { borderWidth: 1 },
+      edges: { selectionWidth: 1.5 }
+    };
+  }
+
+  function ensureNetwork(view) {
+    if (built[view] || view === 'compare' || view === 'run') { return; }
+    var data =
+      view === 'structure' ? buildStructure() :
+      view === 'components' ? buildStrategy('components', S.a, dagA, 'dag_a') :
+      view === 'single' ? buildStrategy('single', S.b, dagB, 'dag_b') :
+      buildFull();
+    var nodesDS = new vis.DataSet(data.nodes);
+    var edgesDS = new vis.DataSet(data.edges);
+    var net = new vis.Network(document.getElementById('net-' + view),
+      { nodes: nodesDS, edges: edgesDS }, netOptions(data.nodes.length));
+    net.once('stabilizationIterationsDone', function () {
+      net.setOptions({ physics: { enabled: false } });  /* freeze for responsiveness */
+      net.fit({ animation: false });
+    });
+    built[view] = { net: net, nodes: nodesDS, base: data.nodes };
+    var legend = legendEl(view);
+    if (legend) {
+      /* onclick (not addEventListener) so scope switches replace the handler */
+      legend.onclick = function (ev) {
+        var row = ev.target.closest ? ev.target.closest('.lrow.clickable') : null;
+        if (!row) { return; }
+        var sel = row.getAttribute('data-sel').split(':');
+        var field = sel[0], value = sel.slice(1).join(':');
+        var ids = S.nodes.filter(function (n) { return n[field] === value; })
+          .map(function (n) { return n.id; });
+        if (ids.length) {
+          net.selectNodes(ids);
+          net.fit({ nodes: ids, animation: true });
+        }
+      };
+    }
+    applySearch();
+  }
+
+  /* ---------------- scope selector ---------------- */
+
+  var scopeSel = document.getElementById('scope-select');
+  DATA.scopes.forEach(function (s) {
+    var o = document.createElement('option');
+    o.value = s;
+    o.textContent = s;
+    scopeSel.appendChild(o);
+  });
+  scopeSel.value = currentScope;
+  scopeSel.addEventListener('change', function () { setScope(scopeSel.value); });
+
+  function setScope(scope) {
+    if (!DATA.per_scope[scope] || scope === currentScope) { return; }
+    currentScope = scope;
+    Object.keys(built).forEach(function (v) { built[v].net.destroy(); });
+    built = {};
+    computeScopeState();
+    renderCompare();
+    ensureNetwork(active);   /* no-op for compare/run */
+  }
+
+  /* ---------------- tabs ---------------- */
+
+  var active = 'structure';
+
+  function activate(view) {
+    active = view;
+    document.querySelectorAll('.tab').forEach(function (t) {
+      t.classList.toggle('active', t.getAttribute('data-view') === view);
+    });
+    document.querySelectorAll('.view').forEach(function (v) {
+      v.classList.toggle('active', v.id === 'view-' + view);
+    });
+    ensureNetwork(view);
+    if (built[view]) { built[view].net.redraw(); }
+  }
+
+  document.querySelectorAll('.tab').forEach(function (t) {
+    t.addEventListener('click', function () { activate(t.getAttribute('data-view')); });
+  });
+
+  /* ---------------- search: highlight matches, dim the rest ------------- */
+
+  var searchBox = document.getElementById('search');
+  searchBox.addEventListener('input', applySearch);
+
+  function applySearch() {
+    var b = built[active];
+    if (!b) { return; }
+    var q = searchBox.value.trim().toLowerCase();
+    var updates = b.base.map(function (n) {
+      if (!q) {
+        return { id: n.id, opacity: 1, borderWidth: 1, color: n.color };
+      }
+      if (n.id.toLowerCase().indexOf(q) >= 0) {
+        var c = JSON.parse(JSON.stringify(n.color));
+        c.border = '#ffffff';
+        return { id: n.id, opacity: 1, borderWidth: 3, color: c };
+      }
+      return { id: n.id, opacity: 0.15, borderWidth: 1, color: n.color };
+    });
+    b.nodes.update(updates);
+  }
+
+  /* ---------------- comparison view (per selected scope) ---------------- */
+
+  var STAT_KEYS = ['n_jobs', 'n_dags', 'n_cross_links', 'cross_links_by_kind',
+    'cross_links_by_mechanism', 'single_job_dags', 'multi_root_dags',
+    'dataset_triggered_dags', 'largest_dag', 'size_histogram'];
+  var BUCKETS = ['1', '2-5', '6-15', '16-50', '51+'];
+
+  function fmtStat(key, v) {
+    if (v === null || v === undefined) { return '—'; }
+    if (typeof v === 'object') {
+      var keys = Object.keys(v);
+      if (key === 'size_histogram') {
+        keys = BUCKETS.filter(function (b) { return b in v; });
+      } else { keys.sort(); }
+      if (keys.length === 0) { return '—'; }
+      return keys.map(function (k) { return esc(k) + ': ' + esc(v[k]); }).join(', ');
+    }
+    return esc(v);
+  }
+
+  function statsTable() {
+    var h = '<div class="card"><h2>Stats — side by side <span class="scopetag">scope: '
+      + esc(currentScope) + '</span></h2><div class="tablewrap">'
+      + '<table class="ctable"><thead><tr><th>metric</th>'
+      + '<th>components</th><th>single-entry</th></tr></thead><tbody>';
+    STAT_KEYS.forEach(function (k) {
+      h += '<tr><td class="metric">' + esc(k) + '</td>'
+        + '<td>' + fmtStat(k, S.a.stats[k]) + '</td>'
+        + '<td>' + fmtStat(k, S.b.stats[k]) + '</td></tr>';
+    });
+    return h + '</tbody></table></div></div>';
+  }
+
+  function histogram() {
+    var ha = S.a.stats.size_histogram || {};
+    var hb = S.b.stats.size_histogram || {};
+    var max = 1;
+    BUCKETS.forEach(function (b) {
+      max = Math.max(max, ha[b] || 0, hb[b] || 0);
+    });
+    var h = '<div class="card"><h2>DAG size histogram</h2>'
+      + '<div class="hint">tasks per DAG, bucketed</div>'
+      + '<div class="serieskey">'
+      + '<span><span class="chip" style="background:var(--series-a)"></span> components</span>'
+      + '<span><span class="chip" style="background:var(--series-b)"></span> single-entry</span>'
+      + '</div><div class="histo">';
+    BUCKETS.forEach(function (b) {
+      var va = ha[b] || 0, vb = hb[b] || 0;
+      h += '<div class="blabel">' + esc(b) + '</div><div class="hbars">'
+        + '<div class="hbar"><div class="hfill a" style="width:' + (va / max * 100).toFixed(1) + '%"></div><span class="hval">' + va + '</span></div>'
+        + '<div class="hbar"><div class="hfill b" style="width:' + (vb / max * 100).toFixed(1) + '%"></div><span class="hval">' + vb + '</span></div>'
+        + '</div>';
+    });
+    return h + '</div></div>';
+  }
+
+  function divergenceTable() {
+    var h = '<div class="card"><h2>Divergence — components DAG vs single-entry placement</h2>'
+      + '<div class="hint">where each components-strategy DAG’s jobs landed under the single-entry strategy</div>'
+      + '<div class="tablewrap"><table class="ctable"><thead><tr>'
+      + '<th>components DAG</th><th class="num">jobs</th><th>single-entry DAGs</th>'
+      + '<th class="num">co-grouped</th><th class="num">split off</th></tr></thead><tbody>';
+    S.divergence.forEach(function (r) {
+      var pills = r.targets.map(function (t) {
+        return '<span class="pill">' + esc(t.dag_b) + ' ×' + t.count + '</span>';
+      }).join('');
+      h += '<tr><td class="metric">' + esc(r.dag_a) + '</td>'
+        + '<td class="num">' + r.n_jobs + '</td>'
+        + '<td>' + pills + '</td>'
+        + '<td class="num">' + r.co_grouped + '</td>'
+        + '<td class="num">' + (r.split > 0 ? '<span class="split-warn">' + r.split + '</span>' : r.split) + '</td></tr>';
+    });
+    if (S.divergence.length === 0) {
+      h += '<tr><td colspan="5" class="empty">no DAGs</td></tr>';
+    }
+    return h + '</tbody></table></div></div>';
+  }
+
+  function diagList(strat) {
+    if (!strat.diagnostics.length) { return '<div class="empty">no diagnostics</div>'; }
+    var h = '<ul class="diaglist">';
+    strat.diagnostics.forEach(function (d) {
+      h += '<li><span class="lvl ' + esc(d.level) + '">' + esc(d.level) + '</span>'
+        + '<span class="code">' + esc(d.code) + '</span>'
+        + esc(d.message)
+        + (d.subject ? ' <span class="subj">— ' + esc(d.subject) + '</span>' : '')
+        + '</li>';
+    });
+    return h + '</ul>';
+  }
+
+  function diagnostics() {
+    return '<div class="card"><h2>Diagnostics</h2><div class="diaggrid">'
+      + '<div class="diagcol"><h3>components (' + S.a.diagnostics.length + ')</h3>' + diagList(S.a) + '</div>'
+      + '<div class="diagcol"><h3>single-entry (' + S.b.diagnostics.length + ')</h3>' + diagList(S.b) + '</div>'
+      + '</div></div>';
+  }
+
+  function renderCompare() {
+    document.getElementById('compare-content').innerHTML =
+      statsTable() + histogram() + divergenceTable() + diagnostics();
+  }
+
+  /* ---------------- run-level view (cross-scope; independent of selector) */
+
+  function runOverviewCard() {
+    var h = '<div class="card"><h2>Scopes — per-XML overview (' + DATA.run.overview.length + ')</h2>'
+      + '<div class="hint">each input XML file is an independent conversion scope; A = components, B = single-entry</div>'
+      + '<div class="tablewrap"><table class="ctable" id="scope-overview-table"><thead><tr>'
+      + '<th>scope</th><th>source file</th><th class="num">jobs</th>'
+      + '<th class="num">DAGs A</th><th class="num">DAGs B</th>'
+      + '<th class="num">x-links A</th><th class="num">x-links B</th>'
+      + '<th class="num">diags A</th><th class="num">diags B</th></tr></thead><tbody>';
+    DATA.run.overview.forEach(function (r) {
+      h += '<tr><td class="metric"><span class="scopetag">' + esc(r.scope) + '</span></td>'
+        + '<td class="filecell">' + esc(r.file) + '</td>'
+        + '<td class="num">' + esc(r.a.n_jobs) + '</td>'
+        + '<td class="num">' + esc(r.a.n_dags) + '</td>'
+        + '<td class="num">' + esc(r.b.n_dags) + '</td>'
+        + '<td class="num">' + esc(r.a.n_cross_links) + '</td>'
+        + '<td class="num">' + esc(r.b.n_cross_links) + '</td>'
+        + '<td class="num">' + esc(r.a.diagnostics) + '</td>'
+        + '<td class="num">' + esc(r.b.diagnostics) + '</td></tr>';
+    });
+    return h + '</tbody></table></div></div>';
+  }
+
+  function crossScopeCard() {
+    var links = DATA.run.cross_scope_links;
+    var h = '<div class="card"><h2>Cross-scope condition links (' + links.length + ')</h2>'
+      + '<div class="hint">condition matches severed by the one-XML scope rule — review whether the '
+      + 'boundary is real or the estate should be exported into one file</div>'
+      + '<div class="tablewrap"><table class="ctable" id="cross-scope-table"><thead><tr>'
+      + '<th>condition</th><th>producer scope</th><th>producer job</th>'
+      + '<th>consumer scope</th><th>consumer job</th></tr></thead><tbody>';
+    links.forEach(function (l) {
+      h += '<tr><td class="metric">' + esc(l.cond) + '</td>'
+        + '<td><span class="scopetag">' + esc(l.producer_scope) + '</span></td>'
+        + '<td>' + esc(l.producer) + '</td>'
+        + '<td><span class="scopetag">' + esc(l.consumer_scope) + '</span></td>'
+        + '<td>' + esc(l.consumer) + '</td></tr>';
+    });
+    if (links.length === 0) {
+      h += '<tr><td colspan="5" class="empty">no cross-scope condition matches</td></tr>';
+    }
+    return h + '</tbody></table></div></div>';
+  }
+
+  function collisionTable(rows) {
+    if (!rows.length) { return '<div class="empty">no collisions</div>'; }
+    var h = '<div class="tablewrap"><table class="ctable"><thead><tr>'
+      + '<th>dag_id</th><th>kept by</th><th>renamed in</th><th>renamed to</th>'
+      + '</tr></thead><tbody>';
+    rows.forEach(function (c) {
+      h += '<tr><td class="metric">' + esc(c.dag_id) + '</td>'
+        + '<td><span class="scopetag">' + esc(c.kept_by) + '</span></td>'
+        + '<td><span class="scopetag">' + esc(c.renamed_in) + '</span></td>'
+        + '<td>' + esc(c.renamed_to) + '</td></tr>';
+    });
+    return h + '</tbody></table></div>';
+  }
+
+  function collisionsCard() {
+    var ca = DATA.run.dag_id_collisions.a;
+    var cb = DATA.run.dag_id_collisions.b;
+    return '<div class="card" id="dag-collisions"><h2>DAG id collisions across scopes ('
+      + (ca.length + cb.length) + ')</h2>'
+      + '<div class="hint">dag_ids stay unique across scopes (one Airflow instance); '
+      + 'later scopes are renamed to &lt;scope&gt;__&lt;dag_id&gt;</div>'
+      + '<div class="diaggrid">'
+      + '<div class="diagcol"><h3>components (' + ca.length + ')</h3>' + collisionTable(ca) + '</div>'
+      + '<div class="diagcol"><h3>single-entry (' + cb.length + ')</h3>' + collisionTable(cb) + '</div>'
+      + '</div></div>';
+  }
+
+  function renderRun() {
+    document.getElementById('run-content').innerHTML =
+      runOverviewCard() + crossScopeCard() + collisionsCard();
+  }
+
+  /* ---------------- boot ---------------- */
+  computeScopeState();
+  renderCompare();
+  renderRun();
+  activate('structure');
+})();
+</script>
+</body>
+</html>

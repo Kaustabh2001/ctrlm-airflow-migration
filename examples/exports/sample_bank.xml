@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DEFTABLE>
+  <FOLDER FOLDER_NAME="BANK_EOD" DATACENTER="CTM_PROD">
+    <JOB JOBNAME="BANK_BAL_CHECK" DESCRIPTION="Verify end-of-day balances are loaded" APPLICATION="BANK"
+         SUB_APPLICATION="EOD" TASKTYPE="Command" APPL_TYPE="DATABASE"
+         CMDLINE="SELECT COUNT(*) FROM balances WHERE ds='%%ODATE'"
+         NODEID="dbnode1" RUN_AS="bankbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="1800">
+      <OUTCOND NAME="BANK-BAL-OK" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <JOB JOBNAME="BANK_SETTLE" DESCRIPTION="Run end-of-day settlement" APPLICATION="BANK"
+         SUB_APPLICATION="EOD" TASKTYPE="Command" CMDLINE="/opt/bank/settle.sh %%ODATE"
+         NODEID="prdnode1" RUN_AS="bankbatch" PRIORITY="AA" CRITICAL="1"
+         TIMEFROM="1900" TIMETO="2300">
+      <INCOND NAME="BANK-BAL-OK" ODATE="ODAT" AND_OR="AND"/>
+      <QUANTITATIVE NAME="SETTLE_SLOTS" QUANT="3"/>
+      <ON STMT="*" CODE="NOTOK">
+        <DOMAIL DEST="ops@corp.com" SUBJECT="BANK settlement failed" MESSAGE="BANK_SETTLE ended NOTOK"/>
+        <DOFORCEJOB JOBNAME="BANK_RECON"/>
+      </ON>
+      <SHOUT WHEN="LATE" DEST="OPS" MESSAGE="BANK_SETTLE running past its window"/>
+      <OUTCOND NAME="BANK-SETTLED" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <JOB JOBNAME="BANK_RECON" DESCRIPTION="Reconcile settlement output" APPLICATION="BANK"
+         SUB_APPLICATION="EOD" TASKTYPE="Command" CMDLINE="/opt/bank/recon.sh %%ODATE"
+         NODEID="prdnode1" RUN_AS="bankbatch">
+      <INCOND NAME="BANK-SETTLED" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+    <JOB JOBNAME="BANK_FT_STATEMENTS" DESCRIPTION="Transfer settlement statements from prdnode1:/bank/out/statements to sftp://partner.corp.com/inbound/statements"
+         APPLICATION="BANK" SUB_APPLICATION="EOD" TASKTYPE="Job" APPL_TYPE="FILE_TRANS"
+         NODEID="prdnode1" RUN_AS="bankbatch">
+      <INCOND NAME="BANK-SETTLED" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+    <JOB JOBNAME="BANK_MAINFRAME_SYNC" DESCRIPTION="Sync settlement postings into SAP mainframe ledger"
+         APPLICATION="BANK" SUB_APPLICATION="EOD" TASKTYPE="Job" APPL_TYPE="SAP"
+         NODEID="prdnode1" RUN_AS="bankbatch">
+      <INCOND NAME="BANK-SETTLED" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+  </FOLDER>
+</DEFTABLE>

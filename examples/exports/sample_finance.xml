@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DEFTABLE>
+  <FOLDER FOLDER_NAME="FIN_DW" DATACENTER="CTM_PROD">
+    <JOB JOBNAME="DW_LOAD_CUSTOMERS" DESCRIPTION="Load customer dimension" APPLICATION="FIN"
+         SUB_APPLICATION="DW" TASKTYPE="Command" CMDLINE="/opt/dw/load_customers.sh %%ODATE"
+         NODEID="dwagent01" RUN_AS="dwbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="2100"
+         MAXRERUN="2" RERUNINTERVAL="10M">
+      <OUTCOND NAME="DW-CUSTOMERS-LOADED" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <JOB JOBNAME="DW_LOAD_ORDERS" DESCRIPTION="Load orders fact" APPLICATION="FIN"
+         SUB_APPLICATION="DW" TASKTYPE="Command" CMDLINE="/opt/dw/load_orders.sh %%ODATE"
+         NODEID="dwagent01" RUN_AS="dwbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="2100"
+         MAXRERUN="2" RERUNINTERVAL="10M">
+      <OUTCOND NAME="DW-ORDERS-LOADED" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <JOB JOBNAME="DW_LOAD_PRODUCTS" DESCRIPTION="Load product dimension" APPLICATION="FIN"
+         SUB_APPLICATION="DW" TASKTYPE="Command" CMDLINE="/opt/dw/load_products.sh %%ODATE"
+         NODEID="dwagent01" RUN_AS="dwbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="2100"
+         MAXRERUN="2" RERUNINTERVAL="10M">
+      <OUTCOND NAME="DW-PRODUCTS-LOADED" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <JOB JOBNAME="DW_BUILD_MART" DESCRIPTION="Build the finance data mart" APPLICATION="FIN"
+         SUB_APPLICATION="DW" TASKTYPE="Command" CMDLINE="/opt/dw/build_mart.sh %%ODATE"
+         NODEID="dwagent01" RUN_AS="dwbatch">
+      <INCOND NAME="DW-CUSTOMERS-LOADED" ODATE="ODAT" AND_OR="AND"/>
+      <INCOND NAME="DW-ORDERS-LOADED" ODATE="ODAT" AND_OR="AND"/>
+      <INCOND NAME="DW-PRODUCTS-LOADED" ODATE="ODAT" AND_OR="AND"/>
+      <OUTCOND NAME="DW-MART-OK" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <JOB JOBNAME="DW_PUBLISH" DESCRIPTION="Publish mart to reporting schema" APPLICATION="FIN"
+         SUB_APPLICATION="DW" TASKTYPE="Command" CMDLINE="/opt/dw/publish.sh %%ODATE"
+         NODEID="dwagent01" RUN_AS="dwbatch">
+      <INCOND NAME="DW-MART-OK" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+  </FOLDER>
+  <SMART_FOLDER FOLDER_NAME="FIN_EOD" DATACENTER="CTM_PROD" WEEKDAYS="1,2,3,4,5">
+    <INCOND NAME="BATCH-OPEN" ODATE="ODAT" AND_OR="AND"/>
+    <OUTCOND NAME="FIN-EOD-DONE" ODATE="ODAT" SIGN="ADD"/>
+    <VARIABLE NAME="ENV" VALUE="prod"/>
+    <JOB JOBNAME="FIN_LOAD_GL" DESCRIPTION="Load general ledger" APPLICATION="FIN"
+         SUB_APPLICATION="EOD" TASKTYPE="Command" CMDLINE="/opt/fin/load_gl.sh %%ODATE"
+         NODEID="finagent01" RUN_AS="finbatch" TIMEFROM="2200">
+      <VARIABLE NAME="ENV" VALUE="gl_override"/>
+      <OUTCOND NAME="FIN-GL-LOADED" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <JOB JOBNAME="FIN_POST_GL" DESCRIPTION="Post general ledger entries" APPLICATION="FIN"
+         SUB_APPLICATION="EOD" TASKTYPE="Command" CMDLINE="/opt/fin/post_gl.sh %%ODATE"
+         NODEID="finagent01" RUN_AS="finbatch">
+      <INCOND NAME="FIN-GL-LOADED" ODATE="ODAT" AND_OR="AND"/>
+      <OUTCOND NAME="FIN-POSTED" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+    <JOB JOBNAME="FIN_EXTRACT" DESCRIPTION="Extract end-of-day finance feed" APPLICATION="FIN"
+         SUB_APPLICATION="EOD" TASKTYPE="Command" CMDLINE="/opt/fin/extract.sh %%ODATE"
+         NODEID="finagent01" RUN_AS="finbatch" TIMEFROM="0200">
+      <INCOND NAME="FIN-POSTED" ODATE="ODAT" AND_OR="AND"/>
+      <OUTCOND NAME="FIN-DONE" ODATE="ODAT" SIGN="ADD"/>
+    </JOB>
+  </SMART_FOLDER>
+  <FOLDER FOLDER_NAME="RISK" DATACENTER="CTM_PROD">
+    <JOB JOBNAME="RISK_CALC" DESCRIPTION="Overnight risk calculation" APPLICATION="RISK"
+         SUB_APPLICATION="CALC" TASKTYPE="Command" CMDLINE="/opt/risk/calc.sh %%ODATE"
+         NODEID="riskagent01" RUN_AS="riskbatch" WEEKDAYS="1,2,3,4,5" TIMEFROM="0300" MAXWAIT="1">
+      <INCOND NAME="FIN-DONE" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+  </FOLDER>
+  <FOLDER FOLDER_NAME="RPT" DATACENTER="CTM_PROD">
+    <JOB JOBNAME="RPT_WEEKLY_PACK" DESCRIPTION="Weekly management reporting pack" APPLICATION="RPT"
+         SUB_APPLICATION="WEEKLY" TASKTYPE="Command" CMDLINE="/opt/rpt/weekly_pack.sh %%ODATE"
+         NODEID="rptagent01" RUN_AS="rptbatch" WEEKDAYS="1" MAXWAIT="2">
+      <INCOND NAME="FIN-DONE" ODATE="ODAT" AND_OR="AND"/>
+    </JOB>
+  </FOLDER>
+</DEFTABLE>

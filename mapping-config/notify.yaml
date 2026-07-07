@@ -1,0 +1,17 @@
+# SHOUT / DOMAIL destination mapping (used by ctm_plugins.callbacks.ctm_shout).
+#
+# Schema: {dest: {type: email|sns|log, target: ...}}
+#   type: email -> airflow.utils.email.send_email (SES on MWAA); target = address
+#   type: sns   -> boto3 sns publish; target = topic ARN
+#   type: log   -> task log only; target optional
+#
+# Resolution order (see ctm_plugins/callbacks.py):
+#   1. a dest containing "@" is treated as an email address directly
+#      (e.g. Control-M "DOMAIL DEST=ops@corp.com" needs no entry here);
+#   2. dest listed below -> that entry;
+#   3. unknown dest -> log-only (never fails the task).
+#
+# Override the file location at runtime with env var CTM_NOTIFY_CONFIG.
+OPS: {type: log}
+OPS-EMAIL: {type: email, target: ops@corp.com}
+OPS-PAGER: {type: sns, target: "arn:aws:sns:us-east-1:123456789012:ctm-alerts"}

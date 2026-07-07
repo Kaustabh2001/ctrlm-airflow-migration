@@ -1,0 +1,28 @@
+# NODEID -> Airflow connection mapping (v2 schema).
+#
+# v2 format:
+#   defaults: {os: linux}          # applied when a node entry omits "os"
+#   nodes:
+#     <nodeid>: {conn_id: <airflow conn id>, os: linux|windows}
+#
+# v1 flat entries (`<nodeid>: <conn_id>`) at the top level are still accepted
+# and default to the "defaults" os (linux).
+#
+# os drives operator selection for Command/Job tasks:
+#   linux   -> SSHOperator            (apache-airflow-providers-ssh)
+#   windows -> WinRMOperator          (apache-airflow-providers-microsoft-winrm)
+# A PowerShell-looking command (regex: \.ps1\b or leading "powershell") forces
+# WinRMOperator regardless of os. Unmapped NODEIDs fall back to
+# "ssh_<nodeid>" / os linux and raise a WARN diagnostic (UNMAPPED_NODE).
+#
+# v3 adds an optional "type" key: `type: db` marks a database endpoint whose
+# conn_id is an Airflow DB connection (used by APPL_TYPE=DATABASE jobs via
+# SQLExecuteQueryOperator). Nodes without "type" behave exactly as before.
+defaults: {os: linux}
+nodes:
+  prdnode1: {conn_id: ssh_prdnode1, os: linux}
+  prdnode2: {conn_id: ssh_prdnode2, os: linux}
+  opsnode1: {conn_id: ssh_opsnode1, os: linux}
+  hrnode1: {conn_id: ssh_hrnode1, os: linux}
+  winnode1: {conn_id: winrm_winnode1, os: windows}
+  dbnode1: {conn_id: bank_dwh, type: db}

@@ -1,0 +1,16 @@
+[project]
+name = "ctrlm-core"
+version = "0.1.0"
+description = "Shared core for Control-M to Airflow conversion: parser, IR, graph, emit"
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ctrlm_core*"]
+
+[tool.setuptools.package-data]
+ctrlm_core = ["templates/*.j2"]
