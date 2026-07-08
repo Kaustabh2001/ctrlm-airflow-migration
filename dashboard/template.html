@@ -75,7 +75,37 @@
   .view.active { display: flex; }
   #view-compare.active, #view-run.active { display: block; overflow: auto; }
 
-  .graph-view .canvas { flex: 1; min-width: 0; background: var(--page); }
+  .graph-view .gmain { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .graph-view .canvas { flex: 1; min-height: 0; background: var(--page); }
+  .toolbar {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 8px 12px; border-bottom: 1px solid var(--hair);
+    background: var(--surface);
+  }
+  .tlabel {
+    font-size: 10.5px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .seg {
+    display: inline-flex; border: 1px solid var(--hair);
+    border-radius: 7px; overflow: hidden; background: var(--page);
+  }
+  .segbtn {
+    appearance: none; border: none; background: transparent;
+    color: var(--ink-2); font: inherit; font-size: 12.5px;
+    padding: 5px 12px; cursor: pointer;
+  }
+  .segbtn + .segbtn { border-left: 1px solid var(--hair); }
+  .segbtn:hover { background: var(--surface-2); color: var(--ink); }
+  .segbtn.active { background: var(--surface-2); color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
+  .dagpick { display: flex; align-items: center; gap: 7px; }
+  .dagpick[hidden] { display: none; }
+  .dag-select {
+    background: var(--page); color: var(--ink);
+    border: 1px solid var(--hair); border-radius: 7px;
+    padding: 5px 8px; font: inherit; font-size: 12.5px; max-width: 340px;
+  }
+  .dag-select:focus { outline: none; border-color: var(--accent); }
   .graph-view .legend {
     width: 270px; flex: none; overflow-y: auto;
     border-left: 1px solid var(--hair); background: var(--surface);
@@ -211,19 +241,52 @@
   </header>
   <main>
     <section id="view-structure" class="view graph-view active">
-      <div class="canvas" id="net-structure"></div>
+      <div class="gmain">
+        <div class="toolbar">
+          <span class="tlabel">Layout</span>
+          <div class="seg" id="layout-toggle">
+            <button class="segbtn active" data-layout="level">Level-wise</button>
+            <button class="segbtn" data-layout="force">Force</button>
+          </div>
+        </div>
+        <div class="canvas" id="net-structure"></div>
+      </div>
       <aside class="legend" id="legend-structure"></aside>
     </section>
     <section id="view-components" class="view graph-view">
-      <div class="canvas" id="net-components"></div>
+      <div class="gmain">
+        <div class="toolbar">
+          <div class="seg mode-toggle" data-strat="components">
+            <button class="segbtn active" data-mode="overview">Partition overview</button>
+            <button class="segbtn" data-mode="dag">DAG graph</button>
+          </div>
+          <label class="dagpick" id="dagpick-components" hidden><span class="tlabel">DAG</span>
+            <select id="dag-select-components" class="dag-select"></select>
+          </label>
+        </div>
+        <div class="canvas" id="net-components"></div>
+      </div>
       <aside class="legend" id="legend-components"></aside>
     </section>
     <section id="view-single" class="view graph-view">
-      <div class="canvas" id="net-single"></div>
+      <div class="gmain">
+        <div class="toolbar">
+          <div class="seg mode-toggle" data-strat="single">
+            <button class="segbtn active" data-mode="overview">Partition overview</button>
+            <button class="segbtn" data-mode="dag">DAG graph</button>
+          </div>
+          <label class="dagpick" id="dagpick-single" hidden><span class="tlabel">DAG</span>
+            <select id="dag-select-single" class="dag-select"></select>
+          </label>
+        </div>
+        <div class="canvas" id="net-single"></div>
+      </div>
       <aside class="legend" id="legend-single"></aside>
     </section>
     <section id="view-full" class="view graph-view">
-      <div class="canvas" id="net-full"></div>
+      <div class="gmain">
+        <div class="canvas" id="net-full"></div>
+      </div>
       <aside class="legend" id="legend-full"></aside>
     </section>
     <section id="view-compare" class="view">
@@ -264,6 +327,20 @@
 
   function kindColor(k) { return KIND_COLORS[k] || '#8a8a84'; }
 
+  /* task-kind styling for the per-DAG graph view (v5).
+     Identity = shape + border style FIRST, hue second (CVD-safe: color is
+     never the only encoding). solid = real work, dashed = synthetic control. */
+  var TASK_KINDS = {
+    job:          { color: '#3987e5', shape: 'box',     dashes: false, fill: true,  label: 'job (solid box)' },
+    gate:         { color: '#9085e9', shape: 'diamond', dashes: true,  fill: false, label: 'gate (time/day guard)' },
+    wait:         { color: '#c98500', shape: 'ellipse', dashes: true,  fill: false, label: 'wait (external sensor)' },
+    confirm:      { color: '#d55181', shape: 'ellipse', dashes: true,  fill: false, label: 'confirm (approval)' },
+    force:        { color: '#d95926', shape: 'box',     dashes: false, fill: true,  label: 'force (trigger DAG run)' },
+    folder_start: { color: '#55554f', shape: 'dot',     dashes: false, fill: true,  label: 'folder start/end', size: 5 },
+    folder_end:   { color: '#55554f', shape: 'dot',     dashes: false, fill: true,  label: 'folder start/end', size: 5 }
+  };
+  var GHOST_INK = '#898781';   /* ghost/external stubs: dotted outline, muted */
+
   function colorAt(i) {
     if (i < PALETTE.length) { return PALETTE[i]; }
     /* deterministic golden-angle fallback beyond the 8 validated slots */
@@ -291,6 +368,11 @@
   var degree = {};
   var built = {};        /* view -> {net, nodes DataSet, base node array} */
 
+  /* v5 view state */
+  var structureLayout = 'level';                            /* 'level' | 'force' */
+  var stratMode = { components: 'overview', single: 'overview' };
+  var stratDag = { components: '', single: '' };            /* selected dag_id */
+
   function computeScopeState() {
     S = DATA.per_scope[currentScope];
     nodeInfo = {};
@@ -307,24 +389,26 @@
     lines.push('folder: ' + n.folder + (n.synthetic ? '  (synthetic)' : ''));
     lines.push('type: ' + n.task_type + (n.cyclic ? '  · cyclic' : ''));
     lines.push('day pattern: ' + (n.day_pattern || 'condition-driven'));
+    lines.push('level: ' + n.level
+      + (n.cycle ? '  · on a cycle — level approximated' : ''));
     if (n.timefrom) { lines.push('timefrom: ' + n.timefrom); }
     lines.push('dag (components): ' + (n.dag_a || '—'));
     lines.push('dag (single-entry): ' + (n.dag_b || '—'));
     return lines.join('\n');
   }
 
-  function makeNodes(keyFn, colorMap) {
+  function makeNodes(keyFn, colorMap, withLevels) {
     return S.nodes.map(function (n) {
       var key = keyFn(n);
       var c = (key !== null && key !== undefined && colorMap[key]) || UNASSIGNED;
-      return {
+      var node = {
         id: n.id,
         label: n.name,
         title: tooltip(n),
         shape: n.cyclic ? 'hexagon' : (n.synthetic ? 'diamond' : 'dot'),
         size: 7 + Math.min(11, degree[n.id] || 0),
         borderWidth: 1,
-        opacity: 1,
+        opacity: n.synthetic ? 0.55 : 1,   /* synthetic folder nodes muted */
         color: {
           background: c, border: c,
           highlight: { background: c, border: '#ffffff' },
@@ -332,6 +416,8 @@
         },
         font: { color: INK2, size: 11, face: 'system-ui', strokeWidth: 0 }
       };
+      if (withLevels) { node.level = n.level; }   /* drives hierarchical ranks */
+      return node;
     });
   }
 
@@ -346,7 +432,9 @@
         highlight: '#ffffff', hover: '#ffffff'
       },
       title: opts.title,
-      smooth: { enabled: true, type: 'dynamic' }
+      smooth: opts.hier
+        ? { enabled: true, type: 'cubicBezier', forceDirection: 'horizontal', roundness: 0.4 }
+        : { enabled: true, type: 'dynamic' }
     };
   }
 
@@ -392,6 +480,58 @@
     legendEl(view).innerHTML = html;
   }
 
+  /* kinds legend for the per-DAG task-graph sub-mode (v5) */
+  function renderDagGraphLegend(view, strat, dagId, plan) {
+    var html = '<h2>DAG</h2>';
+    if (!plan) {
+      html += '<div class="empty">no dag_plans entry for ' + esc(dagId) + '</div>';
+      legendEl(view).innerHTML = html;
+      return;
+    }
+    var sched = plan.dataset_triggered ? 'dataset-triggered'
+      : (plan.schedule ? plan.schedule : 'no schedule');
+    html += '<div class="lrow"><span class="lname" title="' + esc(dagId) + '">'
+      + esc(dagId) + '</span><span class="lcount">' + plan.tasks.length + ' tasks</span></div>';
+    html += '<div class="lnote">' + esc(sched) + '</div>';
+    plan.datasets.forEach(function (ds) {
+      html += '<div class="lnote">' + esc(ds) + '</div>';
+    });
+
+    var counts = {};
+    plan.tasks.forEach(function (t) {
+      var st = TASK_KINDS[t.kind] || TASK_KINDS.job;
+      counts[st.label] = (counts[st.label] || 0) + 1;
+    });
+    html += '<h2 class="kinds-legend">Task kinds</h2>';
+    var seen = {};
+    ['job', 'gate', 'wait', 'confirm', 'force', 'folder_start', 'folder_end']
+      .forEach(function (k) {
+        var st = TASK_KINDS[k];
+        if (seen[st.label] || !(st.label in counts)) { return; }
+        seen[st.label] = true;
+        html += lrow(st.color, st.label, counts[st.label],
+          { badge: st.dashes ? 'dashed' : null });
+      });
+    html += lrow(GHOST_INK, 'ghost / external stub',
+      (plan.dataset_triggered ? plan.datasets.length : 0)
+        + plan.outlets.length + plan.external_waits.length,
+      { badge: 'dotted' });
+    html += '<div class="lnote">solid = real work · dashed border = generated '
+      + 'control task · dotted ghost = outside this DAG</div>';
+
+    html += '<h2>Cross-DAG context</h2>';
+    html += lrow(GHOST_INK, 'external waits', plan.external_waits.length, { line: true });
+    plan.external_waits.slice(0, 10).forEach(function (w) {
+      html += '<div class="lnote">' + esc(w.external_dag_id + '.' + w.external_task_id)
+        + ' → ' + esc(w.task_id) + '</div>';
+    });
+    html += lrow(GHOST_INK, 'outlet datasets', plan.outlets.length, { line: true });
+    plan.outlets.slice(0, 10).forEach(function (o) {
+      html += '<div class="lnote">' + esc(o.task_id) + ' → ' + esc(o.dataset) + '</div>';
+    });
+    legendEl(view).innerHTML = html;
+  }
+
   function renderKindLegend(view, kindCounts) {
     var html = '<h2>Edge kinds</h2>';
     Object.keys(kindCounts).sort().forEach(function (k) {
@@ -415,13 +555,18 @@
   function dagB(n) { return n.dag_b; }
 
   function buildStructure() {
+    var hier = structureLayout === 'level';
     var cmap = categoryColors(S.folders.map(function (f) { return f.name; }));
     var edges = S.e_edges.map(function (e) {
       return edgeObj(e.source, e.target,
-        { color: EDGE_NEUTRAL, title: 'E — ' + e.conds.join(', ') });
+        { color: EDGE_NEUTRAL, hier: hier, title: 'E — ' + e.conds.join(', ') });
     });
     renderFolderLegend('structure', cmap);
-    return { nodes: makeNodes(function (n) { return n.folder; }, cmap), edges: edges };
+    return {
+      nodes: makeNodes(function (n) { return n.folder; }, cmap, hier),
+      edges: edges,
+      hier: hier
+    };
   }
 
   function buildStrategy(view, strat, keyFn, dagKey) {
@@ -447,6 +592,125 @@
     return { nodes: makeNodes(keyFn, cmap), edges: edges };
   }
 
+  /* -------- per-DAG task graph (v5): dag_plans.json, hierarchical LR ----- */
+
+  function taskTooltip(t, dagId) {
+    var lines = [t.task_id];
+    lines.push('dag: ' + dagId);
+    lines.push('kind: ' + t.kind + '  · operator: ' + t.operator);
+    if (t.source_uid) { lines.push('Control-M job: ' + t.source_uid); }
+    if (t.task_group) { lines.push('task group: ' + t.task_group); }
+    lines.push('upstream: ' + t.upstream.length);
+    lines.push('level: ' + t.level
+      + (t.cycle ? '  · on a cycle — level approximated' : ''));
+    return lines.join('\n');
+  }
+
+  function taskNode(t, dagId, shift) {
+    var st = TASK_KINDS[t.kind] || TASK_KINDS.job;
+    var inside = st.shape === 'box' || st.shape === 'ellipse';
+    var bg = st.fill ? st.color : '#232322';
+    return {
+      id: t.task_id,
+      label: t.task_id + (t.kind === 'job' && t.operator ? '\n' + t.operator : ''),
+      title: taskTooltip(t, dagId),
+      level: t.level + shift,
+      shape: st.shape,
+      size: st.size || 12,
+      borderWidth: st.dashes ? 1.6 : 1,
+      shapeProperties: { borderDashes: st.dashes ? [5, 3] : false },
+      opacity: 1,
+      color: {
+        background: bg, border: st.color,
+        highlight: { background: bg, border: '#ffffff' },
+        hover: { background: bg, border: '#ffffff' }
+      },
+      font: {
+        color: (inside && st.fill) ? '#ffffff' : INK2,
+        size: 11, face: 'system-ui', strokeWidth: 0, multi: false
+      }
+    };
+  }
+
+  /* ghost external stubs: dotted outline, muted, tooltip only */
+  function ghostNode(id, label, level, title, shape) {
+    return {
+      id: id, label: label, title: title, level: level,
+      shape: shape, size: 10,
+      borderWidth: 1.4,
+      shapeProperties: { borderDashes: [2, 4] },
+      chosen: false,
+      color: {
+        background: '#1a1a19', border: GHOST_INK,
+        highlight: { background: '#1a1a19', border: GHOST_INK },
+        hover: { background: '#1a1a19', border: GHOST_INK }
+      },
+      font: { color: GHOST_INK, size: 10.5, face: 'system-ui', strokeWidth: 0 }
+    };
+  }
+
+  function ghostEdge(from, to, title) {
+    var e = edgeObj(from, to, { color: GHOST_INK, dashed: true, hier: true, title: title });
+    e.width = 1;
+    return e;
+  }
+
+  function buildDagGraph(view, strat) {
+    var dagId = stratDag[view];
+    var plan = strat.dag_plans[dagId];
+    renderDagGraphLegend(view, strat, dagId, plan);
+    if (!plan) { return { nodes: [], edges: [], hier: true }; }
+
+    /* dataset-triggered DAGs get ghost inbound datasets at rank 0 */
+    var shift = (plan.dataset_triggered && plan.datasets.length) ? 1 : 0;
+    var nodes = [], edges = [];
+    var have = {}, levelOf = {};
+    plan.tasks.forEach(function (t) {
+      have[t.task_id] = true;
+      levelOf[t.task_id] = t.level + shift;
+    });
+
+    plan.tasks.forEach(function (t) {
+      nodes.push(taskNode(t, dagId, shift));
+      t.upstream.forEach(function (u) {
+        if (!have[u]) { return; }
+        edges.push(edgeObj(u, t.task_id,
+          { color: EDGE_NEUTRAL, hier: true, title: u + ' → ' + t.task_id }));
+      });
+    });
+
+    if (shift) {
+      var roots = plan.tasks.filter(function (t) { return t.upstream.length === 0; });
+      plan.datasets.forEach(function (ds) {
+        var gid = 'ghost_ds_in:' + ds;
+        nodes.push(ghostNode(gid, ds, 0,
+          'inbound dataset (triggers this DAG)\n' + ds, 'database'));
+        roots.forEach(function (r) {
+          edges.push(ghostEdge(gid, r.task_id, 'dataset trigger → ' + r.task_id));
+        });
+      });
+    }
+
+    plan.outlets.forEach(function (o) {
+      var gid = 'ghost_ds_out:' + o.task_id + ':' + o.dataset;
+      nodes.push(ghostNode(gid, o.dataset,
+        (levelOf[o.task_id] || 0) + 1,
+        'outlet dataset (produced by ' + o.task_id + ')\n' + o.dataset, 'database'));
+      edges.push(ghostEdge(o.task_id, gid, o.task_id + ' → dataset'));
+    });
+
+    plan.external_waits.forEach(function (w) {
+      var ext = w.external_dag_id + '.' + w.external_task_id;
+      var gid = 'ghost_ext:' + w.task_id + ':' + ext;
+      nodes.push(ghostNode(gid, ext,
+        (levelOf[w.task_id] || 0) - 1,
+        'external task (in another DAG)\n' + ext + '\nawaited by ' + w.task_id, 'box'));
+      edges.push(ghostEdge(gid, w.task_id, ext + ' → ' + w.task_id));
+    });
+
+    return { nodes: nodes, edges: edges, hier: true };
+  }
+
   function buildFull() {
     var cmap = categoryColors(S.folders.map(function (f) { return f.name; }));
     var kindCounts = {};
@@ -466,11 +730,31 @@
 
   /* ---------------- networks: build lazily per scope, freeze on settle -- */
 
-  function netOptions(nNodes) {
+  function netOptions(nNodes, hier) {
+    var interaction = { hover: true, tooltipDelay: 120, hideEdgesOnDrag: true, multiselect: true };
+    if (hier) {
+      /* level-wise (Backstage-style): explicit node.level drives the ranks;
+         deterministic, physics OFF */
+      return {
+        autoResize: true,
+        layout: {
+          randomSeed: 7,
+          hierarchical: {
+            enabled: true, direction: 'LR', sortMethod: 'directed',
+            levelSeparation: 180, nodeSpacing: 48, treeSpacing: 64,
+            blockShifting: true, edgeMinimization: true, parentCentralization: false
+          }
+        },
+        physics: { enabled: false },
+        interaction: interaction,
+        nodes: { borderWidth: 1 },
+        edges: { selectionWidth: 1.5 }
+      };
+    }
     return {
       autoResize: true,
       layout: { randomSeed: 7, improvedLayout: nNodes <= 200 },
-      interaction: { hover: true, tooltipDelay: 120, hideEdgesOnDrag: true, multiselect: true },
+      interaction: interaction,
       physics: {
         enabled: true,
         solver: 'forceAtlas2Based',
@@ -490,17 +774,26 @@
     if (built[view] || view === 'compare' || view === 'run') { return; }
     var data =
       view === 'structure' ? buildStructure() :
-      view === 'components' ? buildStrategy('components', S.a, dagA, 'dag_a') :
-      view === 'single' ? buildStrategy('single', S.b, dagB, 'dag_b') :
+      view === 'components' ? (stratMode.components === 'dag'
+        ? buildDagGraph('components', S.a)
+        : buildStrategy('components', S.a, dagA, 'dag_a')) :
+      view === 'single' ? (stratMode.single === 'dag'
+        ? buildDagGraph('single', S.b)
+        : buildStrategy('single', S.b, dagB, 'dag_b')) :
       buildFull();
     var nodesDS = new vis.DataSet(data.nodes);
     var edgesDS = new vis.DataSet(data.edges);
     var net = new vis.Network(document.getElementById('net-' + view),
-      { nodes: nodesDS, edges: edgesDS }, netOptions(data.nodes.length));
-    net.once('stabilizationIterationsDone', function () {
-      net.setOptions({ physics: { enabled: false } });  /* freeze for responsiveness */
+      { nodes: nodesDS, edges: edgesDS }, netOptions(data.nodes.length, data.hier));
+    if (data.hier) {
+      /* physics is off: layout is immediate, just frame it */
       net.fit({ animation: false });
-    });
+    } else {
+      net.once('stabilizationIterationsDone', function () {
+        net.setOptions({ physics: { enabled: false } });  /* freeze for responsiveness */
+        net.fit({ animation: false });
+      });
+    }
     built[view] = { net: net, nodes: nodesDS, base: data.nodes };
     var legend = legendEl(view);
     if (legend) {
@@ -539,9 +832,75 @@
     Object.keys(built).forEach(function (v) { built[v].net.destroy(); });
     built = {};
     computeScopeState();
+    populateDagSelects();
     renderCompare();
     ensureNetwork(active);   /* no-op for compare/run */
   }
+
+  /* ---------------- v5 controls: layout toggle, sub-mode, DAG selector --- */
+
+  function rebuild(view) {
+    if (built[view]) {
+      built[view].net.destroy();
+      delete built[view];
+    }
+    if (view === active) { ensureNetwork(view); }
+  }
+
+  document.querySelectorAll('#layout-toggle .segbtn').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var mode = b.getAttribute('data-layout');
+      if (mode === structureLayout) { return; }
+      structureLayout = mode;
+      document.querySelectorAll('#layout-toggle .segbtn').forEach(function (x) {
+        x.classList.toggle('active', x === b);
+      });
+      rebuild('structure');
+    });
+  });
+
+  document.querySelectorAll('.mode-toggle').forEach(function (seg) {
+    var view = seg.getAttribute('data-strat');
+    seg.querySelectorAll('.segbtn').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var mode = b.getAttribute('data-mode');
+        if (mode === stratMode[view]) { return; }
+        stratMode[view] = mode;
+        seg.querySelectorAll('.segbtn').forEach(function (x) {
+          x.classList.toggle('active', x === b);
+        });
+        document.getElementById('dagpick-' + view).hidden = (mode !== 'dag');
+        rebuild(view);
+      });
+    });
+  });
+
+  function stratOf(view) { return view === 'components' ? S.a : S.b; }
+
+  function populateDagSelects() {
+    ['components', 'single'].forEach(function (view) {
+      var sel = document.getElementById('dag-select-' + view);
+      var plans = stratOf(view).dag_plans;
+      var ids = Object.keys(plans).sort();
+      sel.innerHTML = '';
+      ids.forEach(function (id) {
+        var o = document.createElement('option');
+        o.value = id;
+        o.textContent = id + ' (' + plans[id].tasks.length + ' tasks)';
+        sel.appendChild(o);
+      });
+      if (ids.indexOf(stratDag[view]) < 0) { stratDag[view] = ids[0] || ''; }
+      sel.value = stratDag[view];
+    });
+  }
+
+  ['components', 'single'].forEach(function (view) {
+    document.getElementById('dag-select-' + view)
+      .addEventListener('change', function () {
+        stratDag[view] = this.value;
+        if (stratMode[view] === 'dag') { rebuild(view); }
+      });
+  });
 
   /* ---------------- tabs ---------------- */
 
@@ -573,15 +932,17 @@
     if (!b) { return; }
     var q = searchBox.value.trim().toLowerCase();
     var updates = b.base.map(function (n) {
+      var baseOpacity = (n.opacity === undefined) ? 1 : n.opacity;
+      var baseBorder = (n.borderWidth === undefined) ? 1 : n.borderWidth;
       if (!q) {
-        return { id: n.id, opacity: 1, borderWidth: 1, color: n.color };
+        return { id: n.id, opacity: baseOpacity, borderWidth: baseBorder, color: n.color };
       }
       if (n.id.toLowerCase().indexOf(q) >= 0) {
         var c = JSON.parse(JSON.stringify(n.color));
         c.border = '#ffffff';
         return { id: n.id, opacity: 1, borderWidth: 3, color: c };
       }
-      return { id: n.id, opacity: 0.15, borderWidth: 1, color: n.color };
+      return { id: n.id, opacity: 0.15, borderWidth: baseBorder, color: n.color };
     });
     b.nodes.update(updates);
   }
@@ -768,6 +1129,7 @@
 
   /* ---------------- boot ---------------- */
   computeScopeState();
+  populateDagSelects();
   renderCompare();
   renderRun();
   activate('structure');

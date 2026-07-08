@@ -1,14 +1,22 @@
-"""Build the offline comparison dashboard (contract: docs/impl-contracts-v2.md, V2-4).
+"""Build the offline comparison dashboard (contracts: impl-contracts-v2.md V2-4,
+impl-contracts-v5.md V5-2).
 
 v2: each strategy output dir is a SCOPE TREE — one sub-directory per input XML
 file plus a run-level scopes.json. For each scope this reads graph.json +
-ir.json from the components output dir (--a) and partition.json from both
-strategy output dirs (--a, --b), then renders ONE self-contained HTML file:
-the vis-network library bundled inside the installed pyvis package is inlined
-once, the per-scope data is embedded as JSON, and dashboard/template.html
-supplies the page + custom JS (scope selector, five per-scope tabbed views,
-plus a run-level overview: cross_scope_links, dag_id_collisions, per-scope
-stats). No CDN / network requests at view time.
+ir.json from the components output dir (--a) and partition.json + dag_plans.json
+from both strategy output dirs (--a, --b), then renders ONE self-contained HTML
+file: the vis-network library bundled inside the installed pyvis package is
+inlined once, the per-scope data is embedded as JSON, and
+dashboard/template.html supplies the page + custom JS (scope selector, five
+per-scope tabbed views, plus a run-level overview: cross_scope_links,
+dag_id_collisions, per-scope stats). No CDN / network requests at view time.
+
+v5: the Control-M structure view is level-wise (hierarchical LR); per-node
+`level` = longest-path depth from the roots of the ORIGINAL dependency graph
+(e_edges + w_edges) is computed HERE (deterministically, with a cycle guard)
+and embedded. Both strategy tabs gain a "DAG graph" sub-mode fed by each
+scope's dag_plans.json (task-level plan of every generated DAG, written by
+emit); per-task levels over the `upstream` edges are computed here too.
 
 Determinism: every iteration that affects output is sorted; the embedded JSON
 is dumped with sort_keys; no wall-clock, no randomness.
@@ -20,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import re
 from pathlib import Path
@@ -33,6 +42,17 @@ TEMPLATE = HERE / "template.html"
 def load_json(path: Path) -> dict:
     if not path.is_file():
         raise FileNotFoundError(f"required input not found: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_dag_plans(path: Path) -> dict:
+    """dag_plans.json is written by v5 emit; old output trees lack it."""
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"dag_plans.json not found: {path} — the strategy output predates "
+            "v5; regenerate it (strategy_components/run.py and "
+            "strategy_single_entry/run.py now write <scope>/dag_plans.json)"
+        )
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -67,6 +87,53 @@ def find_vis_js() -> str:
     return best.read_text(encoding="utf-8").replace("</script", "<\\/script")
 
 
+# ------------------------------------------------------------------ levels
+
+def compute_levels(
+    node_ids: list[str], edges: list[tuple[str, str]]
+) -> tuple[dict[str, int], set[str]]:
+    """Longest-path depth from roots for every node, with a cycle guard.
+
+    Returns (levels, cyclic): `levels[n]` is the longest-path distance from any
+    in-degree-0 node (roots = 0). Nodes that a topological pass cannot resolve
+    (on a cycle, or only reachable through one) get
+    level = max(level of already-levelled predecessors) + 1 (0 if none) and are
+    listed in `cyclic` so the UI can flag the approximation. Deterministic:
+    node order is sorted everywhere; self-loops are ignored.
+    """
+    ids = sorted(set(node_ids))
+    known = set(ids)
+    succ: dict[str, list[str]] = {n: [] for n in ids}
+    pred: dict[str, list[str]] = {n: [] for n in ids}
+    indeg: dict[str, int] = {n: 0 for n in ids}
+    for src, tgt in sorted(set(edges)):
+        if src == tgt or src not in known or tgt not in known:
+            continue
+        succ[src].append(tgt)
+        pred[tgt].append(src)
+        indeg[tgt] += 1
+
+    levels: dict[str, int] = {}
+    best: dict[str, int] = {}
+    queue = sorted(n for n in ids if indeg[n] == 0)
+    heapq.heapify(queue)
+    remaining = dict(indeg)
+    while queue:
+        node = heapq.heappop(queue)
+        levels[node] = best.get(node, 0)
+        for nxt in succ[node]:
+            best[nxt] = max(best.get(nxt, 0), levels[node] + 1)
+            remaining[nxt] -= 1
+            if remaining[nxt] == 0:
+                heapq.heappush(queue, nxt)
+
+    cyclic = sorted(n for n in ids if n not in levels)
+    for node in cyclic:  # sorted: earlier cyclic levels feed later ones
+        seen = [levels[p] for p in pred[node] if p in levels]
+        levels[node] = (max(seen) + 1) if seen else 0
+    return levels, set(cyclic)
+
+
 # ------------------------------------------------------------------ per-scope payload
 
 def merge_edges(edges: list[dict]) -> list[dict]:
@@ -81,7 +148,52 @@ def merge_edges(edges: list[dict]) -> list[dict]:
     ]
 
 
-def strategy_payload(part: dict) -> dict:
+def dag_plan_payload(plan: dict) -> dict:
+    """One DAG's task plan (from dag_plans.json) + per-task longest-path level."""
+    tasks = sorted(plan.get("tasks", []), key=lambda t: t["task_id"])
+    edges = [
+        (up, t["task_id"]) for t in tasks for up in t.get("upstream", [])
+    ]
+    levels, cyclic = compute_levels([t["task_id"] for t in tasks], edges)
+    return {
+        "schedule": plan.get("schedule"),
+        "dataset_triggered": bool(plan.get("dataset_triggered")),
+        "datasets": sorted(plan.get("datasets", [])),
+        "tasks": [
+            {
+                "task_id": t["task_id"],
+                "kind": t.get("kind", "job"),
+                "operator": t.get("operator", ""),
+                "source_uid": t.get("source_uid"),
+                "task_group": t.get("task_group"),
+                "upstream": sorted(t.get("upstream", [])),
+                "level": levels[t["task_id"]],
+                "cycle": t["task_id"] in cyclic,
+            }
+            for t in tasks
+        ],
+        "outlets": sorted(
+            (
+                {"task_id": o["task_id"], "dataset": o["dataset"]}
+                for o in plan.get("outlets", [])
+            ),
+            key=lambda o: (o["task_id"], o["dataset"]),
+        ),
+        "external_waits": sorted(
+            (
+                {
+                    "task_id": w["task_id"],
+                    "external_dag_id": w.get("external_dag_id", ""),
+                    "external_task_id": w.get("external_task_id", ""),
+                }
+                for w in plan.get("external_waits", [])
+            ),
+            key=lambda w: (w["task_id"], w["external_dag_id"], w["external_task_id"]),
+        ),
+    }
+
+
+def strategy_payload(part: dict, dag_plans: dict) -> dict:
     dags = sorted(part.get("dags", []), key=lambda d: d["dag_id"])
     cross = sorted(
         (
@@ -111,6 +223,10 @@ def strategy_payload(part: dict) -> dict:
             for d in dags
         ],
         "cross_links": cross,
+        "dag_plans": {
+            dag_id: dag_plan_payload(plan)
+            for dag_id, plan in sorted(dag_plans.items())
+        },
         "diagnostics": [
             {
                 "level": d.get("level", "info"),
@@ -151,10 +267,25 @@ def divergence_rows(part_a: dict, part_b: dict) -> list[dict]:
     return rows
 
 
-def scope_payload(graph: dict, ir: dict, part_a: dict, part_b: dict) -> dict:
+def scope_payload(
+    graph: dict,
+    ir: dict,
+    part_a: dict,
+    part_b: dict,
+    plans_a: dict,
+    plans_b: dict,
+) -> dict:
     """The full data bundle for ONE scope (drives the five per-scope views)."""
     a_assign = part_a.get("assignments", {})
     b_assign = part_b.get("assignments", {})
+
+    # v5: longest-path levels over the ORIGINAL job graph (e_edges + w_edges;
+    # graph.json is written before strategy cuts) drive the level-wise view.
+    dep_edges = [
+        (e["source"], e["target"])
+        for e in graph.get("e_edges", []) + graph.get("w_edges", [])
+    ]
+    levels, cyclic = compute_levels(sorted(graph.get("nodes", {})), dep_edges)
 
     nodes = []
     for uid, job in sorted(graph.get("nodes", {}).items()):
@@ -168,6 +299,8 @@ def scope_payload(graph: dict, ir: dict, part_a: dict, part_b: dict) -> dict:
                 "timefrom": job.get("timefrom", ""),
                 "cyclic": bool(job.get("cyclic")),
                 "synthetic": bool(job.get("synthetic")),
+                "level": levels.get(uid, 0),
+                "cycle": uid in cyclic,
                 "dag_a": a_assign.get(uid),
                 "dag_b": b_assign.get(uid),
             }
@@ -195,8 +328,8 @@ def scope_payload(graph: dict, ir: dict, part_a: dict, part_b: dict) -> dict:
             graph.get("dead_end_conds", []), key=lambda o: o.get("cond", "")
         ),
         "folders": folders,
-        "a": strategy_payload(part_a),
-        "b": strategy_payload(part_b),
+        "a": strategy_payload(part_a, plans_a),
+        "b": strategy_payload(part_b, plans_b),
         "divergence": divergence_rows(part_a, part_b),
     }
 
@@ -311,7 +444,9 @@ def build_dashboard(a_dir: Path, b_dir: Path, out_path: Path) -> Path:
         ir = load_json(a_dir / scope / "ir.json")
         part_a = load_json(a_dir / scope / "partition.json")
         part_b = load_json(b_dir / scope / "partition.json")
-        per_scope[scope] = scope_payload(graph, ir, part_a, part_b)
+        plans_a = load_dag_plans(a_dir / scope / "dag_plans.json")
+        plans_b = load_dag_plans(b_dir / scope / "dag_plans.json")
+        per_scope[scope] = scope_payload(graph, ir, part_a, part_b, plans_a, plans_b)
 
     payload = {
         "scopes": names_a,

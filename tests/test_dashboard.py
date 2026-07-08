@@ -203,6 +203,117 @@ def _ops_scope() -> tuple[Deftable, CtmGraph, PartitionResult, PartitionResult]:
     return deftable, graph, part_a, part_b
 
 
+# ------------------------------------------------------------------ dag_plans.json fixtures (v5)
+# Plain dicts following the V5-1 contract schema (the emit module is built
+# concurrently; the dashboard consumes the schema, not the implementation).
+
+def _fin_plans_a() -> dict:
+    """Components strategy, scope fin: one DAG exercising every task kind
+    except confirm/force, plus an outlet and an external wait."""
+    return {
+        "fin_dw": {
+            "schedule": "0 21 * * 1-5",
+            "dataset_triggered": False,
+            "datasets": [],
+            "tasks": [
+                {"task_id": "start_fin", "kind": "folder_start",
+                 "operator": "EmptyOperator", "source_uid": None,
+                 "task_group": None, "upstream": []},
+                {"task_id": "wait_ext_feed", "kind": "wait",
+                 "operator": "ExternalTaskSensor", "source_uid": None,
+                 "task_group": None, "upstream": ["start_fin"]},
+                {"task_id": "load", "kind": "job", "operator": "SSHOperator",
+                 "source_uid": "FIN/LOAD", "task_group": "FIN",
+                 "upstream": ["wait_ext_feed"]},
+                {"task_id": "gate_mart", "kind": "gate",
+                 "operator": "DateTimeSensorAsync", "source_uid": None,
+                 "task_group": None, "upstream": ["load"]},
+                {"task_id": "mart", "kind": "job", "operator": "CtmDatabaseJob",
+                 "source_uid": "FIN/MART", "task_group": "FIN",
+                 "upstream": ["gate_mart"]},
+                {"task_id": "publish", "kind": "job", "operator": "SSHOperator",
+                 "source_uid": "FIN/PUBLISH", "task_group": "FIN",
+                 "upstream": ["mart"]},
+                {"task_id": "end_fin", "kind": "folder_end",
+                 "operator": "EmptyOperator", "source_uid": None,
+                 "task_group": None, "upstream": ["publish"]},
+            ],
+            "outlets": [{"task_id": "mart", "dataset": "ctrlm://cond/MART-OK"}],
+            "external_waits": [
+                {"task_id": "wait_ext_feed", "external_dag_id": "ext_feed",
+                 "external_task_id": "feed_done"},
+            ],
+        },
+    }
+
+
+def _fin_plans_b() -> dict:
+    """Single-entry strategy, scope fin: producer DAG with an outlet + a
+    dataset-triggered consumer DAG with confirm and force tasks."""
+    return {
+        "fin_load": {
+            "schedule": "0 21 * * 1-5",
+            "dataset_triggered": False,
+            "datasets": [],
+            "tasks": [
+                {"task_id": "load", "kind": "job", "operator": "SSHOperator",
+                 "source_uid": "FIN/LOAD", "task_group": "FIN", "upstream": []},
+                {"task_id": "mart", "kind": "job", "operator": "CtmDatabaseJob",
+                 "source_uid": "FIN/MART", "task_group": "FIN",
+                 "upstream": ["load"]},
+            ],
+            "outlets": [{"task_id": "mart", "dataset": "ctrlm://cond/MART-OK"}],
+            "external_waits": [],
+        },
+        "fin_publish": {
+            "schedule": None,
+            "dataset_triggered": True,
+            "datasets": ["ctrlm://cond/MART-OK"],
+            "tasks": [
+                {"task_id": "confirm_publish", "kind": "confirm",
+                 "operator": "CtmApprovalGateSensor", "source_uid": None,
+                 "task_group": None, "upstream": []},
+                {"task_id": "publish", "kind": "job", "operator": "SSHOperator",
+                 "source_uid": "FIN/PUBLISH", "task_group": None,
+                 "upstream": ["confirm_publish"]},
+                {"task_id": "force_notify", "kind": "force",
+                 "operator": "TriggerDagRunOperator", "source_uid": None,
+                 "task_group": None, "upstream": ["publish"]},
+            ],
+            "outlets": [],
+            "external_waits": [],
+        },
+    }
+
+
+def _ops_plans() -> dict:
+    """Scope ops: identical single-job DAGs under both strategies."""
+    return {
+        "ops_poll": {
+            "schedule": "*/15 6-19 * * *",
+            "dataset_triggered": False,
+            "datasets": [],
+            "tasks": [
+                {"task_id": "poll", "kind": "job", "operator": "SSHOperator",
+                 "source_uid": "OPS/POLL", "task_group": None, "upstream": []},
+            ],
+            "outlets": [],
+            "external_waits": [],
+        },
+        "ops_weekly": {
+            "schedule": "0 6 * * 1",
+            "dataset_triggered": False,
+            "datasets": [],
+            "tasks": [
+                {"task_id": "weekly", "kind": "job", "operator": "SSHOperator",
+                 "source_uid": "OPS/WEEKLY", "task_group": None, "upstream": []},
+            ],
+            "outlets": [],
+            "external_waits": [],
+        },
+    }
+
+
 # ------------------------------------------------------------------ scope trees
 
 CROSS_SCOPE_LINKS = [
@@ -239,16 +350,18 @@ def _fixture_dirs(tmp_path: Path) -> tuple[Path, Path]:
     a_dir = tmp_path / "components"
     b_dir = tmp_path / "single_entry"
     scopes = {
-        "fin": (fin_ir, fin_graph, fin_a, fin_b),
-        "ops": (ops_ir, ops_graph, ops_a, ops_b),
+        "fin": (fin_ir, fin_graph, fin_a, fin_b, _fin_plans_a(), _fin_plans_b()),
+        "ops": (ops_ir, ops_graph, ops_a, ops_b, _ops_plans(), _ops_plans()),
     }
-    for scope, (ir, graph, part_a, part_b) in scopes.items():
-        for base, part in ((a_dir, part_a), (b_dir, part_b)):
+    for scope, (ir, graph, part_a, part_b, plans_a, plans_b) in scopes.items():
+        for base, part, plans in ((a_dir, part_a, plans_a), (b_dir, part_b, plans_b)):
             sdir = base / scope
             sdir.mkdir(parents=True)
             (sdir / "ir.json").write_text(ir.model_dump_json(indent=2), encoding="utf-8")
             (sdir / "graph.json").write_text(graph.model_dump_json(indent=2), encoding="utf-8")
             (sdir / "partition.json").write_text(part.model_dump_json(indent=2), encoding="utf-8")
+            (sdir / "dag_plans.json").write_text(
+                json.dumps(plans, indent=2, sort_keys=True), encoding="utf-8")
 
     def entries(parts: dict[str, PartitionResult]) -> list[dict]:
         return [
@@ -357,6 +470,113 @@ def test_dashboard_divergence_and_assignments(tmp_path):
     assert '"split":1' in html
     # per-node dag assignment under both strategies (for tooltips)
     assert '"dag_a":"fin_dw"' in html and '"dag_b":"fin_load"' in html
+
+
+def test_dashboard_levelwise_structure(tmp_path):
+    """V5-2: structure tab is level-wise (hierarchical LR) with a layout toggle."""
+    a_dir, b_dir = _fixture_dirs(tmp_path)
+    out = tmp_path / "index.html"
+    html = _run_build(a_dir, b_dir, out)
+
+    # layout toggle (Level-wise default | Force)
+    assert 'id="layout-toggle"' in html
+    assert 'data-layout="level"' in html
+    assert 'data-layout="force"' in html
+    assert "Level-wise" in html
+    # hierarchical LR layout config is part of the view code
+    assert "hierarchical" in html
+    assert "'LR'" in html or '"LR"' in html
+
+    # longest-path node levels are computed in build.py and embedded
+    # (node dict keys are sorted by json.dumps: ..."id":X,"level":N,...)
+    assert '"id":"FIN/LOAD","level":0' in html
+    assert '"id":"FIN/MART","level":1' in html
+    assert '"id":"FIN/PUBLISH","level":2' in html
+    # cycle-guard flag present on every node (no cycles in the fixtures)
+    assert '"cycle":false' in html and '"cycle":true' not in html
+
+
+def test_dashboard_dag_graph_view(tmp_path):
+    """V5-2: strategy tabs gain a Partition overview | DAG graph sub-mode fed
+    by dag_plans.json, with ghost external stubs and a task-kinds legend."""
+    a_dir, b_dir = _fixture_dirs(tmp_path)
+    out = tmp_path / "index.html"
+    html = _run_build(a_dir, b_dir, out)
+
+    # sub-mode switch + per-strategy DAG selector
+    assert 'data-mode="overview"' in html
+    assert 'data-mode="dag"' in html
+    assert 'id="dag-select-components"' in html
+    assert 'id="dag-select-single"' in html
+
+    # ghost/external stub markers (dataset in/out + external task stubs)
+    assert "ghost_ext:" in html
+    assert "ghost_ds_in:" in html
+    assert "ghost_ds_out:" in html
+
+    # task-kinds legend
+    assert "kinds-legend" in html
+
+    # dag_plans of BOTH strategies are embedded, with per-task levels
+    assert '"dag_plans":' in html
+    for marker in (
+        '"task_id":"gate_mart"',                      # gate task (components)
+        '"task_id":"wait_ext_feed"',                  # wait task
+        '"external_dag_id":"ext_feed"',               # external wait target
+        '"task_id":"confirm_publish"',                # confirm (single-entry)
+        '"task_id":"force_notify"',                   # force task
+        '"kind":"folder_start","level":0',            # computed task levels
+        '"kind":"folder_end","level":6',
+        '"dataset_triggered":true',                   # ghost inbound datasets
+        '"dataset":"ctrlm://cond/MART-OK"',           # outlet entry
+    ):
+        assert marker in html, f"dag_plans marker {marker} not embedded"
+
+
+def test_dashboard_missing_dag_plans_fails(tmp_path):
+    """v5 requires <scope>/dag_plans.json; a pre-v5 tree must fail loudly."""
+    a_dir, b_dir = _fixture_dirs(tmp_path)
+    (b_dir / "ops" / "dag_plans.json").unlink()
+
+    out = tmp_path / "index.html"
+    proc = subprocess.run(
+        [sys.executable, str(BUILD),
+         "--a", str(a_dir), "--b", str(b_dir), "-o", str(out)],
+        cwd=REPO, capture_output=True, text=True,
+    )
+    assert proc.returncode != 0
+    err = proc.stderr + proc.stdout
+    assert "dag_plans.json" in err
+    assert "regenerate" in err
+
+
+def test_compute_levels_cycle_guard():
+    """V5-2: longest-path levels with the cycle guard — cyclic nodes get
+    level = max(level of already-levelled predecessors) + 1 and are flagged."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("dashboard_build", BUILD)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # a -> b -> c -> b (cycle), b -> d (only reachable through the cycle)
+    levels, cyclic = mod.compute_levels(
+        ["a", "b", "c", "d"],
+        [("a", "b"), ("b", "c"), ("c", "b"), ("b", "d")],
+    )
+    assert levels["a"] == 0
+    assert cyclic == {"b", "c", "d"}       # d resolves only through the cycle
+    assert levels["b"] == 1                # pred a levelled at 0
+    assert levels["c"] == 2                # pred b approximated at 1
+    assert levels["d"] == 2
+
+    # acyclic diamond: longest path wins; nothing flagged
+    levels2, cyclic2 = mod.compute_levels(
+        ["r", "x", "y", "z"],
+        [("r", "x"), ("r", "y"), ("x", "y"), ("y", "z")],
+    )
+    assert cyclic2 == set()
+    assert levels2 == {"r": 0, "x": 1, "y": 2, "z": 3}
 
 
 def test_dashboard_deterministic(tmp_path):

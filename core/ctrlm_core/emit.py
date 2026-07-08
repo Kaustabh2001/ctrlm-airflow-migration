@@ -23,6 +23,13 @@ this file), black formatting (fallback: raw render), py_compile syntax
 validation (raises). Quantitative/control resources seen during a run are
 collected into ``<scope>/config/pools.json`` next to the dags directory.
 
+V5-1 (docs/impl-contracts-v5.md): the SAME TaskPlan pass that renders the
+code also records a task-level plan of every generated DAG into
+``<scope>/dag_plans.json`` (task kinds job/gate/confirm/wait/force/
+folder_start/folder_end, source_uid, task_group, upstream edges mirroring the
+emitted ``>>`` dependencies, outlets, external waits, schedule/dataset info).
+Purely additive — the rendered .py output is byte-identical to v4.
+
 Airflow is NEVER imported here — it only appears in the *generated* code text
 (including imports from the write-once ``ctm_plugins`` package deployed to
 MWAA as plugins.zip). All iteration orders are sorted; output is a pure
@@ -41,6 +48,7 @@ import black
 import yaml
 from jinja2 import Environment, FileSystemLoader
 
+from .desugar import END_JOB_NAME, START_JOB_NAME
 from .model import (
     WIRE_DATASET,
     WIRE_PREV,
@@ -207,6 +215,92 @@ def _plan_dag(spec: DagSpec, graph: CtmGraph) -> dict:
     }
 
 
+# ------------------------------------------------- dag_plans.json recording
+#
+# V5-1: the render pass below records every task it declares (and every `>>`
+# edge it emits) into a per-dag record; emit_dags serializes the records to
+# <scope>/dag_plans.json. The record is produced by the SAME pass that writes
+# the code — never re-derived — so it mirrors the .py files exactly.
+
+# helper-task operator -> plan "kind" (anything else declared via ExtraTask
+# is a gate-like structural task)
+_EXTRA_TASK_KINDS = {
+    "CtmApprovalGateSensor": "confirm",
+    "TriggerDagRunOperator": "force",
+}
+
+
+def _job_kind(job: Job) -> str:
+    """Plan kind of a graph-member task: job | folder_start | folder_end."""
+    if job.synthetic:
+        if job.name == START_JOB_NAME:
+            return "folder_start"
+        if job.name == END_JOB_NAME:
+            return "folder_end"
+    return "job"
+
+
+def _new_dag_record(spec: DagSpec) -> dict:
+    """Mutable per-dag recorder (finalized by _finalize_dag_record)."""
+    return {
+        "schedule": spec.schedule or None,
+        "dataset_triggered": bool(spec.dataset_triggered),
+        "datasets": sorted(set(spec.datasets)),
+        "tasks": {},  # task_id -> {kind, operator, source_uid, task_group, upstream:set}
+        "outlets": [],
+        "external_waits": [],
+    }
+
+
+def _record_task(
+    rec: dict,
+    task_id: str,
+    kind: str,
+    operator: str,
+    source_uid: str | None = None,
+    task_group: str | None = None,
+) -> None:
+    rec["tasks"][task_id] = {
+        "kind": kind,
+        "operator": operator,
+        "source_uid": source_uid,
+        "task_group": task_group,
+        "upstream": set(),
+    }
+
+
+def _record_edge(rec: dict, upstream_id: str, downstream_id: str) -> None:
+    """Mirror one emitted ``upstream >> downstream`` dependency."""
+    rec["tasks"][downstream_id]["upstream"].add(upstream_id)
+
+
+def _finalize_dag_record(rec: dict) -> dict:
+    """Freeze the recorder into the contract schema (sorted, JSON-ready)."""
+    return {
+        "schedule": rec["schedule"],
+        "dataset_triggered": rec["dataset_triggered"],
+        "datasets": rec["datasets"],
+        "tasks": [
+            {
+                "task_id": task_id,
+                "kind": t["kind"],
+                "operator": t["operator"],
+                "source_uid": t["source_uid"],
+                "task_group": t["task_group"],
+                "upstream": sorted(t["upstream"]),
+            }
+            for task_id, t in sorted(rec["tasks"].items())
+        ],
+        "outlets": sorted(
+            rec["outlets"], key=lambda o: (o["task_id"], o["dataset"])
+        ),
+        "external_waits": sorted(
+            rec["external_waits"],
+            key=lambda w: (w["task_id"], w["external_dag_id"], w["external_task_id"]),
+        ),
+    }
+
+
 # ---------------------------------------------------------------- rendering
 
 
@@ -253,16 +347,29 @@ def _extra_task_lines(
     plan: dict,
     used_vars: set[str],
     imports: set[str],
+    rec: dict,
+    main_task_id: str,
+    task_group: str | None,
 ) -> list[str]:
     """Declare one helper task (gate/sensor/trigger) and its edge to main."""
     eid = plan["ids"].claim(extra.base_id)
     evar = _var_name(eid, used_vars)
     lines = list(extra.comments)
     lines.append(f"{evar} = {_render_call(extra.operator, eid, extra.kwargs)}")
+    _record_task(
+        rec,
+        eid,
+        _EXTRA_TASK_KINDS.get(extra.operator, "gate"),
+        extra.operator,
+        None,
+        task_group,
+    )
     if extra.relation == "downstream":
         lines.append(f"{main_var} >> {evar}")
+        _record_edge(rec, main_task_id, eid)
     else:
         lines.append(f"{evar} >> {main_var}")
+        _record_edge(rec, eid, main_task_id)
     imports.update(extra.imports)
     return lines
 
@@ -276,6 +383,7 @@ def _task_lines(
     outlets: dict[str, list[str]],
     result: PartitionResult,
     imports: set[str],
+    rec: dict,
 ) -> list[str]:
     """Code lines (unindented) declaring one task (+ helper tasks)."""
     job: Job = plan["jobs"][uid]
@@ -289,6 +397,7 @@ def _task_lines(
     apply_common_params(tplan, job, ctx, task_id)
     _merge_plan_diagnostics(result, tplan)
     imports.update(tplan.imports)
+    _record_task(rec, task_id, _job_kind(job), tplan.operator, uid, info["group"])
 
     # dataset outlets: cross-link producer outlets + DOCOND ADD extras
     uris = sorted(set(outlets.get(uid, [])) | set(tplan.outlets))
@@ -297,6 +406,8 @@ def _task_lines(
         tplan.kwargs["outlets"] = Raw(
             "[" + ", ".join(f'Dataset("{u}")' for u in uris) + "]"
         )
+        for u in uris:
+            rec["outlets"].append({"task_id": task_id, "dataset": u})
 
     kind = "synthetic" if job.synthetic else (job.task_type or "Command")
     appl = f", appl_type={job.appl_type}" if job.appl_type else ""
@@ -307,7 +418,11 @@ def _task_lines(
     lines.extend(tplan.comments)
     lines.append(f"{var} = {_render_call(tplan.operator, task_id, tplan.kwargs)}")
     for extra in tplan.upstream + tplan.downstream:
-        lines.extend(_extra_task_lines(extra, var, plan, used_vars, imports))
+        lines.extend(
+            _extra_task_lines(
+                extra, var, plan, used_vars, imports, rec, task_id, info["group"]
+            )
+        )
     return lines
 
 
@@ -319,12 +434,14 @@ def _render_dag(
     ctx: RegistryContext,
     plans: dict[str, dict],
     template,
-) -> str:
+) -> tuple[str, dict]:
+    """Render one DAG file; returns (code text, finalized dag_plans record)."""
     plan = plans[spec.dag_id]
     member = set(spec.jobs)
     imports: set[str] = set()
     var_of: dict[str, str] = {}
     used_vars: set[str] = set()
+    rec = _new_dag_record(spec)
 
     # ---- dataset outlets (this dag is PRODUCER) / consumer-side sensor links
     outlets: dict[str, list[str]] = {}
@@ -358,7 +475,7 @@ def _render_dag(
             body.append(f'with TaskGroup(group_id="{gid}"):')
             for uid in sorted(u for u, j in plan["jobs"].items() if j.folder == folder):
                 for line in _task_lines(
-                    uid, plan, var_of, used_vars, ctx, outlets, result, imports
+                    uid, plan, var_of, used_vars, ctx, outlets, result, imports, rec
                 ):
                     body.append("    " + line)
             body.append("")
@@ -366,7 +483,7 @@ def _render_dag(
         for uid in sorted(plan["jobs"]):
             body.extend(
                 _task_lines(
-                    uid, plan, var_of, used_vars, ctx, outlets, result, imports
+                    uid, plan, var_of, used_vars, ctx, outlets, result, imports, rec
                 )
             )
         body.append("")
@@ -383,6 +500,13 @@ def _render_dag(
         body.append("# intra-DAG dependencies (Control-M same-ODATE conditions)")
         body.extend(f"{up} >> {down}" for up, down in pairs)
         body.append("")
+    for e in graph.e_edges:  # record the same edges by task id (dedup via set)
+        if e.source in member and e.target in member and e.source != e.target:
+            _record_edge(
+                rec,
+                plan["tasks"][e.source]["task_id"],
+                plan["tasks"][e.target]["task_id"],
+            )
 
     # ---- time gates: members starting later than the dag anchor (ODATE clock)
     if spec.anchor:
@@ -413,6 +537,8 @@ def _render_dag(
             )
             body.append(f"{gate_var} >> {var_of[uid]}")
             body.append("")
+            _record_task(rec, gate_id, "gate", "DateTimeSensorAsync")
+            _record_edge(rec, gate_id, plan["tasks"][uid]["task_id"])
 
     # ---- cross-DAG links where this dag is the CONSUMER (sensor mechanisms)
     for link in consumer_links:
@@ -446,6 +572,15 @@ def _render_dag(
         )
         body.append(f"{wait_var} >> {var_of[link.target]}")
         body.append("")
+        _record_task(rec, wait_id, "wait", "ExternalTaskSensor")
+        _record_edge(rec, wait_id, plan["tasks"][link.target]["task_id"])
+        rec["external_waits"].append(
+            {
+                "task_id": wait_id,
+                "external_dag_id": src_dag,
+                "external_task_id": ext_task,
+            }
+        )
 
     while body and body[-1] == "":
         body.pop()
@@ -490,7 +625,7 @@ def _render_dag(
         if t not in tags:
             tags.append(t)
 
-    return template.render(
+    code = template.render(
         docstring=_docstring(spec, result, plan),
         imports=import_lines,
         dag_id=spec.dag_id,
@@ -499,6 +634,7 @@ def _render_dag(
         tags_repr=json.dumps(tags),
         body="\n".join(("    " + line) if line else "" for line in body) or "    pass",
     )
+    return code, _finalize_dag_record(rec)
 
 
 # ---------------------------------------------------------------- validation
@@ -536,6 +672,11 @@ def emit_dags(
     writes the pools collected from QUANTITATIVE/CONTROL resources to
     ``<scope>/config/pools.json`` (sibling of the dags directory).
 
+    V5-1: also writes ``<scope>/dag_plans.json`` — the task-level plan of
+    every generated DAG (kinds, operators, source uids, task groups, upstream
+    edges mirroring the emitted ``>>`` lines, outlets, external waits,
+    schedule/dataset info) — recorded by the same pass that rendered the code.
+
     Because the pipeline serializes ``<scope>/partition.json`` BEFORE calling
     emit_dags, a pre-existing ``partition.json`` sibling of the dags directory
     is rewritten at the end with the updated result, so the emit-time
@@ -563,8 +704,10 @@ def emit_dags(
     plans = {spec.dag_id: _plan_dag(spec, graph) for spec in specs}
 
     written: list[Path] = []
+    dag_plans: dict[str, dict] = {}
     for spec in specs:
-        code = _render_dag(spec, graph, result, config, ctx, plans, template)
+        code, dag_plan = _render_dag(spec, graph, result, config, ctx, plans, template)
+        dag_plans[spec.dag_id] = dag_plan
         try:
             code = black.format_str(code, mode=black.Mode())
         except Exception:  # fallback: raw render (still py_compile-checked)
@@ -573,6 +716,15 @@ def emit_dags(
         path.write_text(code, encoding="utf-8", newline="\n")
         _check_syntax(path)
         written.append(path)
+
+    # V5-1: <scope>/dag_plans.json — the task-level plan of every generated
+    # DAG, from the SAME pass that rendered the code above (sorted keys/lists,
+    # trailing newline, LF endings -> byte-stable across reruns).
+    (dags_dir.parent / "dag_plans.json").write_text(
+        json.dumps(dag_plans, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
     if ctx.pools:  # <scope>/config/pools.json — import with `airflow pools import`
         config_dir = dags_dir.parent / "config"

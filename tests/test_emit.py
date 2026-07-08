@@ -877,3 +877,203 @@ def test_partition_json_not_created_when_absent(tmp_path: Path):
     emit_dags(graph, result, scope_dir / "dags", PartitionConfig())
     assert result.diagnostics  # diagnostics still returned in memory
     assert not (scope_dir / "partition.json").exists()
+
+
+# ------------------------------------------------- v5 dag_plans.json (V5-1)
+
+import re  # noqa: E402  (kept local to the v5 test block)
+
+
+def _load_dag_plans(dags_dir_parent: Path) -> dict:
+    return json.loads(
+        (dags_dir_parent / "dag_plans.json").read_text(encoding="utf-8")
+    )
+
+
+def _rendered_task_ids(text: str) -> set[str]:
+    # lookbehind excludes external_task_id= / trigger_dag_id= style kwargs
+    return set(re.findall(r'(?<!\w)task_id="([^"]+)"', text))
+
+
+def _rendered_edges(text: str) -> set[tuple[str, str]]:
+    """All `up >> down` dependency lines of a rendered file (var == task_id
+    for every fixture used here — plain identifiers, no dedup/keyword clash)."""
+    return {
+        (m.group(1), m.group(2))
+        for m in re.finditer(r"^\s*(\w+) >> (\w+)\s*$", text, re.MULTILINE)
+    }
+
+
+def _plan_edges(dag_plan: dict) -> set[tuple[str, str]]:
+    return {
+        (up, t["task_id"]) for t in dag_plan["tasks"] for up in t["upstream"]
+    }
+
+
+def test_dag_plans_written_for_every_dag(emitted, tmp_path: Path):
+    paths, texts, _ = emitted
+    plans = _load_dag_plans(paths[0].parent.parent)
+    assert sorted(plans) == sorted(texts)  # one plan per emitted dag file
+
+
+def test_dag_plans_task_sets_match_rendered_code(emitted):
+    paths, texts, _ = emitted
+    plans = _load_dag_plans(paths[0].parent.parent)
+    for dag_id, text in texts.items():
+        plan_ids = {t["task_id"] for t in plans[dag_id]["tasks"]}
+        assert plan_ids == _rendered_task_ids(text), dag_id
+
+
+def test_dag_plans_upstream_mirrors_emitted_edges(emitted):
+    paths, texts, _ = emitted
+    plans = _load_dag_plans(paths[0].parent.parent)
+    for dag_id, text in texts.items():
+        assert _plan_edges(plans[dag_id]) == _rendered_edges(text), dag_id
+    # spot-check the fixture's known edges land in the right upstream lists
+    fin = {t["task_id"]: t for t in plans["fin_dw"]["tasks"]}
+    assert fin["mart"]["upstream"] == ["gate_mart", "load"]
+    assert fin["extract"]["upstream"] == ["gate_extract", "mart"]
+    risk = {t["task_id"]: t for t in plans["risk"]["tasks"]}
+    assert risk["calc"]["upstream"] == ["wait_extract", "wait_load"]
+
+
+def test_dag_plans_kinds_operators_and_provenance(emitted):
+    paths, _, _ = emitted
+    plans = _load_dag_plans(paths[0].parent.parent)
+    fin = {t["task_id"]: t for t in plans["fin_dw"]["tasks"]}
+    # job tasks carry their Control-M uid + operator + TaskGroup (multi-folder)
+    assert fin["load"]["kind"] == "job"
+    assert fin["load"]["operator"] == "SSHOperator"
+    assert fin["load"]["source_uid"] == "FIN_DW/LOAD"
+    assert fin["load"]["task_group"] == "fin_dw"
+    assert fin["report"]["operator"] == "EmptyOperator"
+    assert fin["report"]["task_group"] == "rpt"
+    # time gates: structural, no source uid, no group (module level)
+    assert fin["gate_mart"]["kind"] == "gate"
+    assert fin["gate_mart"]["operator"] == "DateTimeSensorAsync"
+    assert fin["gate_mart"]["source_uid"] is None
+    assert fin["gate_mart"]["task_group"] is None
+    # waits: structural sensors in the consumer dag
+    risk = {t["task_id"]: t for t in plans["risk"]["tasks"]}
+    assert risk["wait_extract"]["kind"] == "wait"
+    assert risk["wait_extract"]["operator"] == "ExternalTaskSensor"
+    assert risk["wait_extract"]["source_uid"] is None
+    # single-folder dag -> no task groups anywhere
+    stg = {t["task_id"]: t for t in plans["stg"]["tasks"]}
+    assert all(t["task_group"] is None for t in stg.values())
+    assert stg["watch"]["operator"] == "CtmFileWatcherSensor"
+
+
+def test_dag_plans_schedule_datasets_outlets_external_waits(emitted):
+    paths, _, _ = emitted
+    plans = _load_dag_plans(paths[0].parent.parent)
+    fin, stg, risk = plans["fin_dw"], plans["stg"], plans["risk"]
+    # schedule / dataset info mirrors the DAG kwargs
+    assert fin["schedule"] == "0 21 * * 1-5"
+    assert fin["dataset_triggered"] is False
+    assert stg["schedule"] is None
+    assert stg["dataset_triggered"] is True
+    assert stg["datasets"] == ["ctrlm://cond/FIN-OK"]
+    # producer outlet recorded on the producing task
+    assert fin["outlets"] == [
+        {"task_id": "mart", "dataset": "ctrlm://cond/FIN-OK"}
+    ]
+    assert stg["outlets"] == []
+    # consumer-side external waits (sensor + prev_run_sensor mechanisms)
+    assert risk["external_waits"] == [
+        {
+            "task_id": "wait_extract",
+            "external_dag_id": "fin_dw",
+            "external_task_id": "fin_dw.extract",
+        },
+        {
+            "task_id": "wait_load",
+            "external_dag_id": "fin_dw",
+            "external_task_id": "fin_dw.load",
+        },
+    ]
+    assert fin["external_waits"] == []
+
+
+def test_dag_plans_confirm_and_force_kinds(tmp_path: Path):
+    from ctrlm_core.model import OnAction
+
+    settle = _job(
+        "BANK_SETTLE", "BANK_EOD", task_type="Command",
+        command="/opt/bank/settle.sh", node_id="prdnode1", confirm=True,
+        on_actions=[OnAction(code="NOTOK",
+                             actions=[{"type": "DOFORCEJOB",
+                                       "JOBNAME": "BANK_RECON"}])],
+    )
+    recon = _job("BANK_RECON", "BANK_EOD", task_type="Command",
+                 command="/opt/bank/recon.sh", node_id="prdnode1")
+    text, _, out_root = _emit_jobs(
+        tmp_path, [settle], extra_assignments={recon.uid: "bank_recon_dag"}
+    )
+    plans = _load_dag_plans(out_root)
+    tasks = {t["task_id"]: t for t in plans["d"]["tasks"]}
+    assert tasks["confirm_bank_settle"]["kind"] == "confirm"
+    assert tasks["confirm_bank_settle"]["operator"] == "CtmApprovalGateSensor"
+    assert tasks["confirm_bank_settle"]["source_uid"] is None
+    assert tasks["force_bank_recon"]["kind"] == "force"
+    assert tasks["force_bank_recon"]["operator"] == "TriggerDagRunOperator"
+    # confirm >> job and job >> force edges mirror the emitted code
+    assert tasks["bank_settle"]["upstream"] == ["confirm_bank_settle"]
+    assert tasks["force_bank_recon"]["upstream"] == ["bank_settle"]
+    assert _plan_edges(plans["d"]) == _rendered_edges(text)
+
+
+def test_dag_plans_folder_start_end_kinds(tmp_path: Path):
+    jobs = [
+        _job("__FOLDER_START__", "F", task_type="Dummy", synthetic=True),
+        _job("A", "F", task_type="Command", command="a.sh", node_id="prdnode1"),
+        _job("__FOLDER_END__", "F", task_type="Dummy", synthetic=True),
+    ]
+    graph = CtmGraph(
+        nodes={j.uid: j for j in jobs},
+        e_edges=[
+            GraphEdge(source="F/__FOLDER_START__", target="F/A",
+                      cond="__start__F"),
+            GraphEdge(source="F/A", target="F/__FOLDER_END__",
+                      cond="__done__F/A"),
+        ],
+    )
+    spec = DagSpec(dag_id="f", jobs=sorted(j.uid for j in jobs), folders=["F"])
+    result = PartitionResult(
+        strategy="components", dags=[spec],
+        assignments={j.uid: "f" for j in jobs},
+    )
+    (path,) = emit_dags(graph, result, tmp_path / "scope" / "dags",
+                        PartitionConfig())
+    plans = _load_dag_plans(tmp_path / "scope")
+    tasks = {t["task_id"]: t for t in plans["f"]["tasks"]}
+    assert tasks["folder_start"]["kind"] == "folder_start"
+    assert tasks["folder_end"]["kind"] == "folder_end"
+    assert tasks["folder_start"]["operator"] == "EmptyOperator"
+    assert tasks["folder_start"]["source_uid"] == "F/__FOLDER_START__"
+    assert tasks["a"]["kind"] == "job"
+    assert tasks["a"]["upstream"] == ["folder_start"]
+    assert tasks["folder_end"]["upstream"] == ["a"]
+
+
+def test_dag_plans_byte_deterministic(tmp_path: Path):
+    mapping = tmp_path / "nodes.yaml"
+    mapping.write_text("prdnode1: ssh_prdnode1\n", encoding="utf-8")
+    outs = []
+    for sub in ("a", "b"):
+        graph, result = make_fixture()
+        emit_dags(
+            graph, result, tmp_path / sub / "dags", PartitionConfig(),
+            mapping_path=mapping,
+        )
+        outs.append((tmp_path / sub / "dag_plans.json").read_bytes())
+    assert outs[0] == outs[1]
+    assert outs[0].endswith(b"\n")
+    assert b"\r" not in outs[0]  # LF-only on every platform
+
+
+def test_dag_plans_rendered_output_unchanged(emitted):
+    """V5-1 is purely additive: the .py files carry no trace of the plan."""
+    _, texts, _ = emitted
+    for text in texts.values():
+        assert "dag_plans" not in text
