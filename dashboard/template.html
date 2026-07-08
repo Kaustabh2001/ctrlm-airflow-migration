@@ -61,6 +61,13 @@
     max-width: 220px;
   }
   #scope-select:focus { outline: none; border-color: var(--accent); }
+  .foldertoggle {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+    cursor: pointer; user-select: none;
+  }
+  .foldertoggle input { accent-color: var(--accent); cursor: pointer; margin: 0; }
   #search {
     width: 200px;
     background: var(--page); color: var(--ink);
@@ -237,6 +244,10 @@
     <label class="scopewrap" for="scope-select">Scope
       <select id="scope-select" title="Conversion scope (one per input XML file)"></select>
     </label>
+    <label class="foldertoggle" for="folder-toggle"
+           title="Synthetic folder start/end nodes are hidden in every view by default; edges are contracted through them. Tick to show them.">
+      <input type="checkbox" id="folder-toggle">Show folder nodes
+    </label>
     <input id="search" type="search" placeholder="Search jobs&hellip;" autocomplete="off">
   </header>
   <main>
@@ -260,6 +271,12 @@
             <button class="segbtn active" data-mode="overview">Partition overview</button>
             <button class="segbtn" data-mode="dag">DAG graph</button>
           </div>
+          <div class="dagpick" id="olayout-wrap-components"><span class="tlabel">Layout</span>
+            <div class="seg olayout" id="olayout-components" data-strat="components">
+              <button class="segbtn active" data-layout="level">Level-wise</button>
+              <button class="segbtn" data-layout="force">Force</button>
+            </div>
+          </div>
           <label class="dagpick" id="dagpick-components" hidden><span class="tlabel">DAG</span>
             <select id="dag-select-components" class="dag-select"></select>
           </label>
@@ -274,6 +291,12 @@
           <div class="seg mode-toggle" data-strat="single">
             <button class="segbtn active" data-mode="overview">Partition overview</button>
             <button class="segbtn" data-mode="dag">DAG graph</button>
+          </div>
+          <div class="dagpick" id="olayout-wrap-single"><span class="tlabel">Layout</span>
+            <div class="seg olayout" id="olayout-single" data-strat="single">
+              <button class="segbtn active" data-layout="level">Level-wise</button>
+              <button class="segbtn" data-layout="force">Force</button>
+            </div>
           </div>
           <label class="dagpick" id="dagpick-single" hidden><span class="tlabel">DAG</span>
             <select id="dag-select-single" class="dag-select"></select>
@@ -372,6 +395,14 @@
   var structureLayout = 'level';                            /* 'level' | 'force' */
   var stratMode = { components: 'overview', single: 'overview' };
   var stratDag = { components: '', single: '' };            /* selected dag_id */
+
+  /* v5.1 view state: synthetic folder start/end nodes are DISPLAY-filtered in
+     every view by default (edges contracted transitively through them); one
+     global "Show folder nodes" toggle restores them everywhere. The generated
+     DAG .py files are untouched — this is presentation only. */
+  var showFolders = false;
+  /* v5.1: partition overviews default to the level-wise hierarchical layout */
+  var overviewLayout = { components: 'level', single: 'level' };
 
   function computeScopeState() {
     S = DATA.per_scope[currentScope];
