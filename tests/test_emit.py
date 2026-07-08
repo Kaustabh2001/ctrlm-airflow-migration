@@ -539,14 +539,14 @@ def test_database_job_sql_operator(tmp_path: Path):
         command="SELECT COUNT(*) FROM balances WHERE ds='%%ODATE'",
     )
     text, result, _ = _emit_jobs(tmp_path, [job])
-    assert "SQLExecuteQueryOperator" in text
-    assert (
-        "from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator"
-        in text
-    )
-    assert 'conn_id="bank_dwh"' in text
+    assert "CtmDatabaseJob" in text
+    assert "from ctm_plugins.operators import CtmDatabaseJob" in text
+    assert 'node="dbnode1"' in text
+    # V4-2: connection resolution happens at parse time inside the operator —
+    # NO conn_id literal anywhere in the generated file.
+    assert "conn_id" not in text
     assert "ds_nodash" in text  # AUTOEDIT applied to the SQL text
-    assert "# provider: apache-airflow-providers-common-sql" in text
+    assert "SQLExecuteQueryOperator" not in text  # subclassed inside the plugin
     assert "SSHOperator" not in text
     assert not any(d.code == "UNMAPPED_NODE" for d in result.diagnostics)
 
@@ -564,7 +564,8 @@ def test_repo_nodes_yaml_maps_dbnode1(tmp_path: Path):
         graph, result, tmp_path / "dags", PartitionConfig(), mapping_path=repo_mapping
     )
     text = path.read_text(encoding="utf-8")
-    assert 'conn_id="bank_dwh"' in text
+    assert 'node="dbnode1"' in text  # repo nodes.yaml maps it -> no diagnostic
+    assert "conn_id" not in text
     assert not any(d.code == "UNMAPPED_NODE" for d in result.diagnostics)
 
 
@@ -572,7 +573,8 @@ def test_database_unmapped_node_partial(tmp_path: Path):
     job = _job("Q", "F", task_type="Command", appl_type="DATABASE",
                node_id="ghostdb", command="SELECT 1")
     text, result, _ = _emit_jobs(tmp_path, [job])
-    assert 'conn_id="db_ghostdb"' in text
+    assert 'node="ghostdb"' in text  # still emitted; resolved at parse time
+    assert "# TODO DATABASE node ghostdb unmapped" in text
     assert ("UNMAPPED_NODE", "ghostdb") in {
         (d.code, d.subject) for d in result.diagnostics
     }
@@ -586,14 +588,16 @@ def test_manual_stub_for_file_trans_and_sap(tmp_path: Path):
              node_id="prdnode1"),
     ]
     text, result, _ = _emit_jobs(tmp_path, jobs)
-    assert "PythonOperator" in text
-    assert "from airflow.operators.python import PythonOperator" in text
-    # the stub function is defined once and raises NotImplementedError
-    assert text.count("def _ctm_manual_stub") == 1
-    assert "raise NotImplementedError" in text
-    assert "python_callable=_ctm_manual_stub" in text
-    assert '"job_type": "TASKTYPE=Job/APPL_TYPE=FILE_TRANS"' in text
-    assert '"job_type": "TASKTYPE=Job/APPL_TYPE=SAP"' in text
+    # V4-2: MANUAL rows emit CtmManualJob — no PythonOperator+prelude stub
+    assert "CtmManualJob" in text
+    assert "from ctm_plugins.operators import CtmManualJob" in text
+    assert "PythonOperator" not in text
+    assert "_ctm_manual_stub" not in text
+    assert 'ctm_task_type="Job"' in text
+    assert 'ctm_appl_type="FILE_TRANS"' in text
+    assert 'ctm_appl_type="SAP"' in text
+    assert 'ctm_job="FT_STMTS"' in text
+    assert 'ctm_job="MAINFRAME_SYNC"' in text
     assert "# TODO FILE_TRANS" in text
     assert "sftp://partner/in" in text  # source/target hint comment
     codes = {(d.code, d.subject) for d in result.diagnostics}
@@ -604,9 +608,11 @@ def test_manual_stub_for_file_trans_and_sap(tmp_path: Path):
 def test_unknown_appl_type_hits_catch_all(tmp_path: Path):
     job = _job("X", "F", task_type="Command", appl_type="MYSTERY", command="x.sh")
     text, result, _ = _emit_jobs(tmp_path, [job])
-    assert "_ctm_manual_stub" in text
-    assert "APPL_TYPE=MYSTERY" in text
+    assert "CtmManualJob" in text
+    assert 'ctm_appl_type="MYSTERY"' in text
+    assert "APPL_TYPE=MYSTERY" in text  # the `# original ...` comment
     assert "SSHOperator" not in text
+    assert "PythonOperator" not in text
     assert any(d.code == "UNSUPPORTED_TYPE" for d in result.diagnostics)
 
 
@@ -645,6 +651,12 @@ def test_bank_settle_full_param_mapping(tmp_path: Path):
     text, result, out_root = _emit_jobs(
         tmp_path, [settle], extra_assignments={recon.uid: "bank_recon_dag"}
     )
+    # v4 operator policy: command jobs stay a PLAIN SSHOperator with the
+    # common params translated inline at codegen time — no Ctm* wrapper class
+    # anywhere in this file (ctm_shout, lowercase, is the only plugin import)
+    assert "SSHOperator" in text
+    assert 'ssh_conn_id="ssh_prdnode1"' in text
+    assert "Ctm" not in text
     # pool + slots
     assert 'pool="SETTLE_SLOTS"' in text
     assert "pool_slots=3" in text

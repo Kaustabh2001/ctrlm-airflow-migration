@@ -72,6 +72,17 @@ def test_registry_rows_and_order():
     assert statuses["file_transfer"] == MANUAL
     assert statuses["known_manual"] == MANUAL
     assert statuses["unsupported"] == MANUAL
+    # v4 operator policy: custom operators ONLY where they add capability;
+    # command jobs stay native SSH/WinRM, Dummy stays EmptyOperator.
+    operators = {e.name: e.operator for e in REGISTRY}
+    assert operators["dummy"] == "EmptyOperator"
+    assert operators["filewatch"] == "CtmFileWatcherSensor"
+    assert operators["database"] == "CtmDatabaseJob"
+    assert operators["file_transfer"] == "CtmManualJob"
+    assert operators["known_manual"] == "CtmManualJob"
+    assert operators["windows_command"] == "WinRMOperator"
+    assert operators["ssh_command"] == "SSHOperator"
+    assert operators["unsupported"] == "CtmManualJob"
 
 
 def test_catch_all_is_last_and_matches_anything():
@@ -130,10 +141,13 @@ def test_database_plan_mapped_conn():
     plan, _ = _plan(job)
     assert plan.entry == "database"
     assert plan.status == FULL
-    assert plan.operator == "SQLExecuteQueryOperator"
-    assert plan.kwargs["conn_id"] == "bank_dwh"
+    assert plan.operator == "CtmDatabaseJob"
+    # connection resolution moved to parse time (V4-2): the plan carries the
+    # NODEID only — no conn_id literal reaches the generated file.
+    assert plan.kwargs["node"] == "dbnode1"
+    assert "conn_id" not in plan.kwargs
     assert "{{ ds_nodash }}" in plan.kwargs["sql"]  # AUTOEDIT applied to SQL
-    assert any("common.sql" in i for i in plan.imports)
+    assert "from ctm_plugins.operators import CtmDatabaseJob" in plan.imports
     assert not plan.diagnostics
 
 
@@ -141,8 +155,10 @@ def test_database_plan_unmapped_conn_is_partial():
     job = _job(task_type="Command", appl_type="DATABASE", node_id="ghost", command="SELECT 1")
     plan, _ = _plan(job)
     assert plan.status == PARTIAL
-    assert plan.kwargs["conn_id"] == "db_ghost"
+    assert plan.kwargs["node"] == "ghost"  # emitted anyway; resolved at parse time
+    assert "conn_id" not in plan.kwargs
     assert ("warn", "UNMAPPED_NODE") in {(d[0], d[1]) for d in plan.diagnostics}
+    assert any("nodes.yaml" in c for c in plan.comments)  # TODO comment
 
 
 def test_filewatch_plan():
@@ -171,13 +187,22 @@ def test_manual_stub_plans_name_original_types():
         plan, _ = _plan(_job(name="X_JOB", task_type="Job", appl_type=appl))
         assert plan.entry == entry
         assert plan.status == MANUAL
-        assert plan.operator == "PythonOperator"
-        assert plan.needs_manual_stub is True
-        assert plan.kwargs["python_callable"] == Raw("_ctm_manual_stub")
-        assert appl in plan.kwargs["op_kwargs"]["job_type"]
-        assert plan.kwargs["op_kwargs"]["job_name"] == "X_JOB"
+        assert plan.operator == "CtmManualJob"
+        assert "from ctm_plugins.operators import CtmManualJob" in plan.imports
+        assert plan.kwargs["ctm_task_type"] == "Job"
+        assert plan.kwargs["ctm_appl_type"] == appl
+        assert plan.kwargs["ctm_job"] == "X_JOB"
         codes = {d[1] for d in plan.diagnostics}
         assert "UNSUPPORTED_TYPE" in codes
+
+
+def test_unsupported_catch_all_stub_defaults_dashes():
+    plan, _ = _plan(_job(name="ODD", task_type="Detached"))
+    assert plan.entry == "unsupported"
+    assert plan.operator == "CtmManualJob"
+    assert plan.kwargs["ctm_task_type"] == "Detached"
+    assert plan.kwargs["ctm_appl_type"] == "-"  # no APPL_TYPE in the export
+    assert plan.kwargs["ctm_job"] == "ODD"
 
 
 def test_file_transfer_comments_name_source_target_hints():
@@ -547,3 +572,31 @@ def test_catalog_documents_the_four_sections():
     assert "## 2. Parameters" in text
     assert "## 3. Custom components" in text
     assert "## 4. Configuration files" in text
+
+
+def test_catalog_documents_playbook_and_roadmap():
+    """V4-2: the extension playbook and the application-type roadmap."""
+    text = _catalog_text()
+    assert "Adding a new job type" in text and "playbook" in text
+    assert "Application-type roadmap" in text
+    # the playbook decision tree is provider-first
+    playbook = text[text.index("Adding a new job type"):]
+    assert playbook.index("provider") < playbook.index("Ctm*")
+    assert "MANUAL" in playbook
+    # every roadmap application type from the contract is present
+    for app in (
+        "SAP",
+        "Informatica",
+        "Hadoop / Spark",
+        "AWS (Lambda / Batch / Step Functions)",
+        "Azure (Data Factory / Functions)",
+        "Databricks",
+        "Snowflake",
+        "Kubernetes",
+        "AFT / MFT",
+        "Web Services / REST",
+        "Java",
+        "IBM i (OS/400)",
+        "z/OS members",
+    ):
+        assert app in text, f"roadmap entry {app!r} missing from the catalog"

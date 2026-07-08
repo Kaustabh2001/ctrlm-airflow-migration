@@ -128,7 +128,6 @@ class TaskPlan:
     outlets: list[str] = field(default_factory=list)    # extra Dataset URIs
     diagnostics: list[tuple[str, str, str, str]] = field(default_factory=list)
     # ^ (level, code, message, subject) — merged into PartitionResult by emit
-    needs_manual_stub: bool = False  # generated file must define _ctm_manual_stub
 
 
 @dataclass
@@ -261,31 +260,31 @@ def _build_database(job: Job, ctx: RegistryContext) -> TaskPlan:
     plan = TaskPlan(
         entry="database",
         status=FULL,
-        operator="SQLExecuteQueryOperator",
-        imports=[
-            "from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator"
+        operator="CtmDatabaseJob",
+        imports=["from ctm_plugins.operators import CtmDatabaseJob"],
+        comments=[
+            "# custom component: ctm_plugins.operators.CtmDatabaseJob (plugins.zip)",
+            "# node resolves to an Airflow connection at parse time via nodes.yaml",
         ],
-        comments=["# provider: apache-airflow-providers-common-sql"],
     )
     entry = ctx.node_map.get(job.node_id) if job.node_id else None
-    if entry is not None:
-        conn = entry["conn_id"]
-    else:  # PARTIAL: db connection unmapped — placeholder conn id + diagnostic
-        conn = f"db_{job.node_id or 'default'}"
+    if entry is None:  # PARTIAL: db node unmapped — parse-time fallback + diagnostic
         plan.status = PARTIAL
         plan.comments.append(
-            f"# TODO DATABASE node {job.node_id or '?'} unmapped — create conn {conn!r}"
+            f"# TODO DATABASE node {job.node_id or '?'} unmapped — add it to "
+            "nodes.yaml with type: db"
         )
         plan.diagnostics.append(
             (
                 "warn",
                 "UNMAPPED_NODE",
-                f"NODEID {job.node_id!r} not in nodes.yaml; using {conn!r}",
+                f"NODEID {job.node_id!r} not in nodes.yaml; CtmDatabaseJob falls "
+                "back to a placeholder connection at parse time",
                 job.node_id or job.uid,
             )
         )
     sql = _translate_command(job, plan)
-    plan.kwargs = {"conn_id": conn, "sql": sql}
+    plan.kwargs = {"node": job.node_id or "", "sql": sql}
     return plan
 
 
@@ -294,15 +293,15 @@ def _manual_stub_plan(entry_name: str, job: Job, extra_comments: list[str]) -> T
     plan = TaskPlan(
         entry=entry_name,
         status=MANUAL,
-        operator="PythonOperator",
-        imports=["from airflow.operators.python import PythonOperator"],
+        operator="CtmManualJob",
+        imports=["from ctm_plugins.operators import CtmManualJob"],
         comments=["# MANUAL: no automatic Airflow mapping — migrate this job by hand"]
         + extra_comments,
-        needs_manual_stub=True,
     )
     plan.kwargs = {
-        "python_callable": Raw("_ctm_manual_stub"),
-        "op_kwargs": {"job_type": job_type, "job_name": job.name},
+        "ctm_task_type": job.task_type or "-",
+        "ctm_appl_type": job.appl_type or "-",
+        "ctm_job": job.name,
     }
     plan.diagnostics.append(
         (
@@ -401,10 +400,8 @@ REGISTRY: list[RegistryEntry] = [
         name="database",
         ctm_type="APPL_TYPE=DATABASE",
         status=FULL,
-        operator="SQLExecuteQueryOperator",
-        imports=(
-            "from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator",
-        ),
+        operator="CtmDatabaseJob",
+        imports=("from ctm_plugins.operators import CtmDatabaseJob",),
         matches=lambda job, ctx: (job.appl_type or "").strip().upper() == "DATABASE",
         build=_build_database,
     ),
@@ -412,8 +409,8 @@ REGISTRY: list[RegistryEntry] = [
         name="file_transfer",
         ctm_type="APPL_TYPE in {FILE_TRANS, AFT, MFT}",
         status=MANUAL,
-        operator="PythonOperator",
-        imports=("from airflow.operators.python import PythonOperator",),
+        operator="CtmManualJob",
+        imports=("from ctm_plugins.operators import CtmManualJob",),
         matches=lambda job, ctx: (job.appl_type or "").strip().upper()
         in FILE_TRANSFER_APPL_TYPES,
         build=_build_file_transfer,
@@ -422,8 +419,8 @@ REGISTRY: list[RegistryEntry] = [
         name="known_manual",
         ctm_type="APPL_TYPE in {SAP, INFORMATICA, HADOOP, PEOPLESOFT, WEBSERVICES, JAVA, MQ, EMR}",
         status=MANUAL,
-        operator="PythonOperator",
-        imports=("from airflow.operators.python import PythonOperator",),
+        operator="CtmManualJob",
+        imports=("from ctm_plugins.operators import CtmManualJob",),
         matches=lambda job, ctx: (job.appl_type or "").strip().upper()
         in KNOWN_MANUAL_APPL_TYPES,
         build=_build_known_manual,
@@ -454,8 +451,8 @@ REGISTRY: list[RegistryEntry] = [
         name="unsupported",
         ctm_type="any other TASKTYPE/APPL_TYPE (catch-all)",
         status=MANUAL,
-        operator="PythonOperator",
-        imports=("from airflow.operators.python import PythonOperator",),
+        operator="CtmManualJob",
+        imports=("from ctm_plugins.operators import CtmManualJob",),
         matches=lambda job, ctx: True,
         build=_build_unsupported,
     ),

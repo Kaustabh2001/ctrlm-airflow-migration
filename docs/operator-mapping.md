@@ -1,13 +1,19 @@
 # Control-M → Airflow operator mapping
 
-> **v3 note — partially superseded.** The authoritative, registry-synced
+> **v3/v4 note — partially superseded.** The authoritative, registry-synced
 > catalog is now [`job-mapping-catalog.md`](job-mapping-catalog.md)
 > (job-type table, param-by-param mapping, `ctm_plugins` components,
-> config schemas). In particular, since v3: `TASKTYPE=FileWatch` emits a real
+> config schemas, extension playbook, application-type roadmap). In
+> particular, since v3: `TASKTYPE=FileWatch` emits a real
 > `ctm_plugins.sensors.CtmFileWatcherSensor` (no longer an `EmptyOperator` +
-> TODO), `CONFIRM` emits an upstream `CtmApprovalGateSensor`, APPL_TYPE
-> `DATABASE` emits `SQLExecuteQueryOperator`, and unknown/manual types emit
-> `NotImplementedError` stubs. Where this document disagrees with the catalog,
+> TODO) and `CONFIRM` emits an upstream `CtmApprovalGateSensor`; since v4:
+> APPL_TYPE `DATABASE` emits `ctm_plugins.operators.CtmDatabaseJob` (node →
+> connection resolved at parse time from `nodes.yaml`, no `conn_id` literal
+> in generated files), and FILE_TRANS/SAP/unknown manual types emit
+> `ctm_plugins.operators.CtmManualJob` (raises `NotImplementedError`).
+> Command/Job tasks deliberately stay plain `SSHOperator`/`WinRMOperator`
+> with common params translated at codegen time (custom operators only where
+> they add capability). Where this document disagrees with the catalog,
 > the catalog wins. The v2 material below (SSH vs WinRM selection, AUTOEDIT
 > translation, cross-link mechanisms, time gates) is still accurate.
 

@@ -11,7 +11,8 @@ implementing **two partitioning strategies** side by side, plus a comparison das
 - `docs/impl-contracts.md` — module contracts for this implementation
   (`docs/impl-contracts-v2.md` — the v2 delta: scopes, nested folders, operators;
   `docs/impl-contracts-v3.md` — the v3 delta: job-type registry, plugins package,
-  full param mapping).
+  full param mapping; `docs/impl-contracts-v4.md` — the v4 delta: targeted
+  custom operators + extension playbook).
 - **`docs/job-mapping-catalog.md`** — the authoritative (v3) Control-M → Airflow
   catalog: every job type → operator (with FULL/PARTIAL/MANUAL status), the
   param-by-param mapping table (PRIORITY/CRITICAL → priority_weight, CONFIRM →
@@ -110,15 +111,21 @@ byte-identical `partition.json`.
   `__start__` condition, end nodes mirror this, and variables cascade
   ancestor → child → job (nearest wins). Day-attribute inheritance walks the
   parent chain to the nearest ancestor folder that has day attributes.
-- **Operator selection** (v3): a declarative job-type registry
+- **Operator policy** (v4): custom operators only where they add capability
+  (DB connectivity, watchers, gates, manual stubs); command jobs stay native
+  SSH/WinRM. No rename-wrapper classes: common params (priority_weight, pool,
+  callbacks, email, sla, retries) are translated at codegen time, not hidden
+  inside operators. Extension playbook + application-type roadmap:
+  `docs/job-mapping-catalog.md`.
+- **Operator selection** (v3, revised v4): a declarative job-type registry
   (`core/ctrlm_core/operator_registry.py`) resolves every job first-match:
   FILEWATCH → `ctm_plugins.sensors.CtmFileWatcherSensor`, APPL_TYPE DATABASE →
-  `SQLExecuteQueryOperator` (conn from `mapping-config/nodes.yaml` `type: db`
-  entries), FILE_TRANS/SAP/other known-manual types → PythonOperator stubs
-  raising `NotImplementedError` (+ `UNSUPPORTED_TYPE` diagnostic), and
-  Command/Job → `WinRMOperator` when the node's OS is `windows` in
-  `mapping-config/nodes.yaml` or the command sniffs as PowerShell
-  (`.ps1` / leading `powershell`), otherwise `SSHOperator`.
+  `ctm_plugins.operators.CtmDatabaseJob` (node → Airflow connection resolved at
+  parse time from `mapping-config/nodes.yaml`), FILE_TRANS/SAP/other known-manual
+  types → `ctm_plugins.operators.CtmManualJob` raising `NotImplementedError`
+  (+ `UNSUPPORTED_TYPE` diagnostic), and Command/Job → `WinRMOperator` when the
+  node's OS is `windows` in `mapping-config/nodes.yaml` or the command sniffs as
+  PowerShell (`.ps1` / leading `powershell`), otherwise `SSHOperator`.
   Full table: `docs/job-mapping-catalog.md`.
 - **Param mapping** (v3): PRIORITY (`AA`..`ZZ`) → `priority_weight` 100..1
   (CRITICAL floors it at 90), CONFIRM → upstream `CtmApprovalGateSensor`,

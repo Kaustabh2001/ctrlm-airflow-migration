@@ -3,26 +3,39 @@
 Custom operators/sensors/timetables/callbacks written ONCE and imported by
 every generated DAG (`from ctm_plugins... import ...`). Deployed to MWAA as
 `plugins.zip`. See `docs/job-mapping-catalog.md` for the full job-type and
-param-by-param mapping this package backs.
+param-by-param mapping this package backs — including the "Adding a new job
+type" playbook and the application-type roadmap.
+
+**Operator policy (v4):** custom operators exist ONLY where they add real
+capability (connection resolution, translation logic, watchers, gates, loud
+manual stubs). Command/Job tasks stay plain `SSHOperator`/`WinRMOperator` and
+`Dummy` stays `EmptyOperator`; their common Control-M params
+(`priority_weight`, `pool`/`pool_slots`, callbacks, `email`, `sla`, retries)
+are translated at CODEGEN time by `core/ctrlm_core/operator_registry.py` —
+which is also the single home of the PRIORITY/CRITICAL -> `priority_weight`
+formula (`AA`=100 .. `ZZ`=1, CRITICAL floors at 90).
 
 ## Components
 
 | Component | File | Maps (Control-M) | Notes |
 |---|---|---|---|
+| `CtmDatabaseJob(node=..., sql=..., ...)` | `ctm_plugins/operators.py` | `APPL_TYPE=DATABASE` | `SQLExecuteQueryOperator` subclass (provider `common-sql`). `node` resolves to `conn_id` at DAG-parse time via `mapping-config/nodes.yaml` (`type: db` entries; unmapped nodes fall back to `ssh_<node>`); an explicit `conn_id` kwarg overrides the lookup. All standard operator kwargs pass through. Also the single landing place for future DB-specific behavior (stored-proc handling, output capture). |
+| `CtmManualJob(ctm_task_type=..., ctm_appl_type=..., ctm_job=..., ...)` | `ctm_plugins/operators.py` | job types with no automatic mapping (FILE_TRANS, SAP, ...) | `BaseOperator` stub replacing the old emitted `PythonOperator`+prelude pattern; `execute()` raises `NotImplementedError` naming `ctm_job`, `ctm_task_type` and `ctm_appl_type` — loud, actionable, impossible to mistake for success. |
+| `resolve_node(node)` | `ctm_plugins/_params.py` | NODEID -> Airflow connection | Pure (airflow-free, unit-tested) `{conn_id, os, type}` lookup behind `CtmDatabaseJob`; reads nodes.yaml (v2 and v1 flat schemas), fallback `ssh_<node>`. |
 | `ctm_odate(logical_dt, new_day_hhmm="0600", fmt="%Y%m%d")` | `ctm_plugins/_odate.py` | `%%ODATE` semantics under a non-midnight New Day time | Pure function, registered as a template macro: `{{ macros.ctm_odate(data_interval_end) }}`. A 05:00 fire with New Day 06:00 yields the PREVIOUS calendar date. |
 | `gate_target(logical_dt, gate_hhmm, new_day_hhmm="0600")` | `ctm_plugins/_odate.py` | `TIMEFROM` gates that cross midnight within one ODATE | Returns the occurrence of `gate_hhmm` belonging to the SAME odate (fire 22:00, gate 02:00 → next morning). Also a macro. |
 | `ctm_shout(dest, message="", when="NOTOK")` | `ctm_plugins/callbacks.py` | `SHOUT` / `ON ... DOMAIL` / `DOSHOUT` | Returns a callable for `on_failure_callback` / `on_success_callback` / `sla_miss_callback`. Destination resolved via `mapping-config/notify.yaml`; a dest containing `@` is emailed directly; unknown dests log only. Email/SNS sends are late-imported inside the callable. |
 | `CtmApprovalGateSensor` | `ctm_plugins/sensors.py` | `CONFIRM=1` (manual confirmation) | Waits (mode `reschedule`, poke 60s) for Airflow Variable `ctm_approve/<dag_id>/<task_id>/<ds>` == `yes`. Approve in the UI (Admin → Variables) or `airflow variables set`. |
 | `CtmFileWatcherSensor(path=...)` | `ctm_plugins/sensors.py` | `FILEWATCH` jobs / `TASKTYPE=FileWatch` | Scheme dispatch: local path exists / `s3://bucket/key` via S3Hook / `sftp://host/path` via SFTPHook. |
 | `CtmCalendarTimetable(calendar_name, anchor_hhmm)` | `ctm_plugins/timetables.py` | periodic/user calendars (DAYSCAL/WEEKCAL) | Fires at `anchor_hhmm` UTC on exactly the dates listed in `mapping-config/calendars.yaml`. |
-| `CtmPlugin` | `ctm_plugin.py` | — | `AirflowPlugin` registering the two macros and the timetable. |
+| `CtmPlugin` | `ctm_plugin.py` | — | `AirflowPlugin` registering the two macros and the timetable (the `Ctm*` operators and sensors are imported directly by generated DAGs; no registration needed in Airflow 2). |
 
 Import discipline (this repo runs on Windows, where Airflow cannot be
-installed): `_odate.py` and `callbacks.py` are airflow-free at import time and
-fully unit-tested; `timetables.py` guards its airflow import so its pure
-date-selection helper (`select_next_fire`) is unit-tested too; `sensors.py`
-and `ctm_plugin.py` import airflow at module level and are only
-syntax-checked (`py_compile`) by `tests/test_plugins.py`.
+installed): `_odate.py`, `_params.py` and `callbacks.py` are airflow-free at
+import time and fully unit-tested; `timetables.py` guards its airflow import
+so its pure date-selection helper (`select_next_fire`) is unit-tested too;
+`operators.py`, `sensors.py` and `ctm_plugin.py` import airflow at module
+level and are only syntax-checked (`py_compile`) by `tests/test_plugins.py`.
 
 ## Config files (ship them with the zip or point env vars at them)
 
@@ -30,6 +43,12 @@ syntax-checked (`py_compile`) by `tests/test_plugins.py`.
   override location with env var `CTM_NOTIFY_CONFIG`.
 - `mapping-config/calendars.yaml` — `{calendar_name: ["YYYY-MM-DD", ...]}`;
   override with `CTM_CALENDARS_CONFIG`.
+- `mapping-config/nodes.yaml` — NODEID -> Airflow connection mapping
+  (`defaults: {os: ...}` + `nodes: {<id>: {conn_id: ..., os: ..., type: ...}}`;
+  v1 flat `<id>: <conn_id>` entries also accepted); override with
+  `CTM_NODES_CONFIG`. **Since v4 this file MUST ship in plugins.zip** —
+  `CtmDatabaseJob` resolves `node` -> `conn_id` at DAG-parse time on MWAA
+  (unmapped nodes degrade to the `ssh_<node>` fallback).
 
 Lookup: an explicit path argument, or failing that the env var, is
 authoritative (a missing file then just means log-only shouts / empty
@@ -68,12 +87,15 @@ plugins.zip
 ├── ctm_plugins/
 │   ├── __init__.py
 │   ├── _odate.py
+│   ├── _params.py
 │   ├── callbacks.py
+│   ├── operators.py
 │   ├── sensors.py
 │   └── timetables.py
 └── mapping-config/
     ├── notify.yaml
-    └── calendars.yaml
+    ├── calendars.yaml
+    └── nodes.yaml          # REQUIRED since v4 (Ctm* node resolution)
 ```
 
 ## Deploying to MWAA

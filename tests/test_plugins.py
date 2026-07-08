@@ -1,9 +1,9 @@
-"""Tests for plugins/ctm_plugins (contract V3-2).
+"""Tests for plugins/ctm_plugins (contracts V3-2 / V4-1 revised).
 
-Pure-logic modules (_odate, callbacks, timetables helpers) are unit-tested
-for real; airflow-importing files (sensors.py, ctm_plugin.py) are only
-syntax-checked with py_compile — Airflow is NOT installed on this platform
-and must never be imported here.
+Pure-logic modules (_odate, callbacks, timetables helpers, _params) are
+unit-tested for real; airflow-importing files (operators.py, sensors.py,
+ctm_plugin.py) are only syntax-checked with py_compile — Airflow is NOT
+installed on this platform and must never be imported here.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ PLUGINS_DIR = REPO / "plugins"
 if str(PLUGINS_DIR) not in sys.path:
     sys.path.insert(0, str(PLUGINS_DIR))
 
-from ctm_plugins import _odate, callbacks, timetables  # noqa: E402
+from ctm_plugins import _odate, _params, callbacks, timetables  # noqa: E402
 
 
 # --------------------------------------------------------------- import law
@@ -316,6 +316,138 @@ def test_timetable_serialize_round_trip_is_pure():
         timetables.CtmCalendarTimetable("X", "9am")
 
 
+# ----------------------------------------------------- resolve_node (V4-1)
+
+NODES_YAML = REPO / "mapping-config" / "nodes.yaml"
+
+
+def test_resolve_node_shipped_file_v2_schema():
+    # v2 schema: defaults + nodes with conn_id/os/type
+    assert _params.resolve_node("dbnode1", path=NODES_YAML) == {
+        "conn_id": "bank_dwh",
+        "os": "linux",  # inherited from defaults
+        "type": "db",
+    }
+    assert _params.resolve_node("winnode1", path=NODES_YAML) == {
+        "conn_id": "winrm_winnode1",
+        "os": "windows",
+        "type": "",
+    }
+
+
+def test_resolve_node_default_path_finds_repo_config():
+    # no explicit path: the repo-layout candidate must resolve
+    assert _params.resolve_node("dbnode1")["conn_id"] == "bank_dwh"
+
+
+def test_resolve_node_v2_defaults_os_inheritance(tmp_path):
+    cfg = tmp_path / "nodes.yaml"
+    cfg.write_text(
+        "defaults: {os: windows}\n"
+        "nodes:\n"
+        "  w1: {conn_id: winrm_w1}\n"
+        "  l1: {conn_id: ssh_l1, os: linux}\n"
+        "  bare: {}\n",
+        encoding="utf-8",
+    )
+    assert _params.resolve_node("w1", path=cfg) == {
+        "conn_id": "winrm_w1", "os": "windows", "type": "",
+    }
+    assert _params.resolve_node("l1", path=cfg)["os"] == "linux"
+    # entry without conn_id falls back to ssh_<node> but keeps the default os
+    assert _params.resolve_node("bare", path=cfg) == {
+        "conn_id": "ssh_bare", "os": "windows", "type": "",
+    }
+
+
+def test_resolve_node_v1_flat_schema(tmp_path):
+    cfg = tmp_path / "nodes.yaml"
+    cfg.write_text("nodeA: conn_a\nnodeB: conn_b\n", encoding="utf-8")
+    assert _params.resolve_node("nodeA", path=cfg) == {
+        "conn_id": "conn_a", "os": "linux", "type": "",
+    }
+    assert _params.resolve_node("nodeB", path=cfg)["conn_id"] == "conn_b"
+
+
+def test_resolve_node_fallback_unmapped_and_empty():
+    # unmapped node -> ssh_<node>/linux; empty node -> ssh_default
+    assert _params.resolve_node("nowhere", node_map={}) == {
+        "conn_id": "ssh_nowhere", "os": "linux", "type": "",
+    }
+    assert _params.resolve_node("", node_map={"x": {"conn_id": "c"}}) == {
+        "conn_id": "ssh_default", "os": "linux", "type": "",
+    }
+    assert _params.resolve_node("  spaced  ", node_map={})["conn_id"] == "ssh_spaced"
+
+
+def test_resolve_node_env_var_override(tmp_path, monkeypatch):
+    cfg = tmp_path / "nodes.yaml"
+    cfg.write_text("nodes:\n  envnode: {conn_id: env_conn}\n", encoding="utf-8")
+    monkeypatch.setenv(_params.NODES_ENV_VAR, str(cfg))
+    assert _params.resolve_node("envnode")["conn_id"] == "env_conn"
+    # env var is authoritative: nodes mapped only in the repo file now fall back
+    assert _params.resolve_node("dbnode1")["conn_id"] == "ssh_dbnode1"
+
+
+def test_resolve_node_env_var_missing_file_is_authoritative(tmp_path, monkeypatch):
+    monkeypatch.setenv(_params.NODES_ENV_VAR, str(tmp_path / "nope.yaml"))
+    assert _params.resolve_node("dbnode1")["conn_id"] == "ssh_dbnode1"
+
+
+def test_resolve_node_missing_and_malformed_degrade_to_fallback(tmp_path):
+    # explicit path is authoritative: missing file -> fallbacks, no search
+    assert _params.resolve_node("dbnode1", path=tmp_path / "nope.yaml") == {
+        "conn_id": "ssh_dbnode1", "os": "linux", "type": "",
+    }
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("- just\n- a list\n", encoding="utf-8")
+    assert _params.resolve_node("dbnode1", path=bad)["conn_id"] == "ssh_dbnode1"
+
+
+def test_resolve_node_pure_with_explicit_map():
+    nmap = {"n1": {"conn_id": "c1", "os": "windows", "type": "db"}}
+    assert _params.resolve_node("n1", node_map=nmap) == {
+        "conn_id": "c1", "os": "windows", "type": "db",
+    }
+    # sparse entries fill defaults
+    assert _params.resolve_node("n2", node_map={"n2": {}}) == {
+        "conn_id": "ssh_n2", "os": "linux", "type": "",
+    }
+
+
+def test_params_surface_is_only_resolve_node():
+    # Revised V4-1: the priority formula stays in core/ctrlm_core/
+    # operator_registry.py and the blanket kwarg-translation surface is gone.
+    for removed in ("priority_weight_for", "pool_kwargs", "translate_common_kwargs"):
+        assert not hasattr(_params, removed)
+
+
+def test_operators_module_source_has_exactly_two_classes():
+    # operators.py cannot be imported here (airflow); assert on its source
+    # that the abandoned blanket wrappers stayed dead.
+    src = (REPO / "plugins" / "ctm_plugins" / "operators.py").read_text(encoding="utf-8")
+    # names built at runtime so a repo-wide grep for the abandoned-attempt
+    # class names stays clean (same trick as the emit-side guard)
+    for removed_suffix in ("CommandJob", "PowerShellJob", "Dummy", "JobMixin"):
+        assert "Ctm" + removed_suffix not in src
+    assert "class CtmDatabaseJob(SQLExecuteQueryOperator):" in src
+    assert "class CtmManualJob(BaseOperator):" in src
+    assert '__all__ = ["CtmDatabaseJob", "CtmManualJob"]' in src
+
+
+def test_package_lazily_reexports_operator_classes():
+    import ctm_plugins
+
+    assert "CtmDatabaseJob" in ctm_plugins.__all__
+    assert "CtmManualJob" in ctm_plugins.__all__
+    # accessing them would import airflow (not installed) — only the lazy
+    # hook's existence is checked here, plus a clean error for unknown names
+    assert callable(getattr(ctm_plugins, "__getattr__"))
+    with pytest.raises(AttributeError):
+        ctm_plugins.no_such_export
+    assert "airflow" not in sys.modules
+
+
 # ------------------------------------------------- airflow wrappers compile
 
 @pytest.mark.parametrize(
@@ -324,7 +456,9 @@ def test_timetable_serialize_round_trip_is_pure():
         "plugins/ctm_plugin.py",
         "plugins/ctm_plugins/__init__.py",
         "plugins/ctm_plugins/_odate.py",
+        "plugins/ctm_plugins/_params.py",
         "plugins/ctm_plugins/callbacks.py",
+        "plugins/ctm_plugins/operators.py",
         "plugins/ctm_plugins/sensors.py",
         "plugins/ctm_plugins/timetables.py",
     ],

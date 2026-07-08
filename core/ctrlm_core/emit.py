@@ -10,6 +10,14 @@ gates, pools, params, ON/DO actions, SLA...) is applied to EVERY task via
 ``operator_registry.apply_common_params``. The user-facing description of the
 whole mapping is docs/job-mapping-catalog.md.
 
+V4-2 (docs/impl-contracts-v4.md): DATABASE jobs emit
+``ctm_plugins.operators.CtmDatabaseJob(node=..., sql=...)`` (connection
+resolved at parse time inside the operator — no conn literal in the file) and
+every MANUAL row emits ``ctm_plugins.operators.CtmManualJob`` instead of the
+old PythonOperator + module-level stub prelude. Everything else is v3 as-is:
+command jobs stay plain SSHOperator/WinRMOperator with the common params
+translated inline at codegen time.
+
 Rendering: Jinja2 template (templates/dag.py.j2, FileSystemLoader relative to
 this file), black formatting (fallback: raw render), py_compile syntax
 validation (raises). Quantitative/control resources seen during a run are
@@ -70,14 +78,6 @@ except Exception:  # pragma: no cover — fallback until schedule.py lands
 
 
 _DEFAULT_SENSOR_TIMEOUT = 21600  # 6h, when the consumer has no MAXWAIT
-
-# module-level stub injected into generated files that contain MANUAL tasks
-_MANUAL_STUB_DEF = '''\
-def _ctm_manual_stub(job_type: str, job_name: str) -> None:
-    """Migration placeholder: this Control-M job has no automatic mapping."""
-    raise NotImplementedError(
-        f"Control-M job {job_name!r} ({job_type}) requires manual migration to Airflow"
-    )'''
 
 
 # ---------------------------------------------------------------- helpers
@@ -276,7 +276,6 @@ def _task_lines(
     outlets: dict[str, list[str]],
     result: PartitionResult,
     imports: set[str],
-    manual_stub: list[bool],
 ) -> list[str]:
     """Code lines (unindented) declaring one task (+ helper tasks)."""
     job: Job = plan["jobs"][uid]
@@ -290,8 +289,6 @@ def _task_lines(
     apply_common_params(tplan, job, ctx, task_id)
     _merge_plan_diagnostics(result, tplan)
     imports.update(tplan.imports)
-    if tplan.needs_manual_stub:
-        manual_stub[0] = True
 
     # dataset outlets: cross-link producer outlets + DOCOND ADD extras
     uris = sorted(set(outlets.get(uid, [])) | set(tplan.outlets))
@@ -328,7 +325,6 @@ def _render_dag(
     imports: set[str] = set()
     var_of: dict[str, str] = {}
     used_vars: set[str] = set()
-    manual_stub = [False]
 
     # ---- dataset outlets (this dag is PRODUCER) / consumer-side sensor links
     outlets: dict[str, list[str]] = {}
@@ -362,8 +358,7 @@ def _render_dag(
             body.append(f'with TaskGroup(group_id="{gid}"):')
             for uid in sorted(u for u, j in plan["jobs"].items() if j.folder == folder):
                 for line in _task_lines(
-                    uid, plan, var_of, used_vars, ctx, outlets, result, imports,
-                    manual_stub,
+                    uid, plan, var_of, used_vars, ctx, outlets, result, imports
                 ):
                     body.append("    " + line)
             body.append("")
@@ -371,8 +366,7 @@ def _render_dag(
         for uid in sorted(plan["jobs"]):
             body.extend(
                 _task_lines(
-                    uid, plan, var_of, used_vars, ctx, outlets, result, imports,
-                    manual_stub,
+                    uid, plan, var_of, used_vars, ctx, outlets, result, imports
                 )
             )
         body.append("")
@@ -499,7 +493,6 @@ def _render_dag(
     return template.render(
         docstring=_docstring(spec, result, plan),
         imports=import_lines,
-        prelude=_MANUAL_STUB_DEF if manual_stub[0] else "",
         dag_id=spec.dag_id,
         schedule_repr=_schedule_repr(spec),
         retries=retries,
