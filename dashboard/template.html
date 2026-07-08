@@ -557,27 +557,29 @@
   }
 
   /* Contract edges transitively through every hidden node: each removed node
-     connects each of its predecessors to each of its successors (dedupe by
-     source|target, no self-edges). Contracted edges keep normal styling; the
+     connects each of its predecessors to each of its successors (deduped by
+     source|target|kind, no self-edges). Contracted edges keep normal styling; the
      tooltip notes "via <folder> gate". Edge recs:
      {source, target, kind, mechanism, conds:[], via:[], dashed} */
   function contractHidden(edges, hiddenIds, folderOf) {
     var out = {}, order = [];
-    function key(s, t) { return s + '\u0000' + t; }
+    /* kind + dash class are part of the edge identity: parallel E and W
+       edges of different kinds stay distinct; duplicates merge (conds/via) */
+    function key(rec) {
+      return rec.source + '\u0000' + rec.target + '\u0000' + rec.kind
+        + '\u0000' + (rec.dashed ? 'w' : 'e');
+    }
     function mergeInto(list, items) {
       (items || []).forEach(function (x) {
         if (list.indexOf(x) < 0) { list.push(x); }
       });
     }
     function addEdge(rec) {
-      var k = key(rec.source, rec.target);
+      var k = key(rec);
       var have = out[k];
       if (!have) { out[k] = rec; order.push(k); return; }
       mergeInto(have.conds, rec.conds);
       mergeInto(have.via, rec.via);
-      if (rec.dashed && !have.dashed) {
-        have.dashed = true; have.kind = rec.kind; have.mechanism = rec.mechanism;
-      }
     }
     edges.forEach(function (e) {
       if (e.source === e.target) { return; }

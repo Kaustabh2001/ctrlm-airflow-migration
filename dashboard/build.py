@@ -18,6 +18,16 @@ and embedded. Both strategy tabs gain a "DAG graph" sub-mode fed by each
 scope's dag_plans.json (task-level plan of every generated DAG, written by
 emit); per-task levels over the `upstream` edges are computed here too.
 
+v5.1: synthetic folder start/end nodes (Job.synthetic in graph.json, task kind
+folder_start/folder_end in dag_plans.json) are hidden by DEFAULT in every view;
+this is display-only and happens in template.html's JS: the FULL data plus the
+flags stay embedded here unchanged, and the template filters the nodes,
+contracts edges transitively through them (tooltip notes "via <folder> gate")
+and recomputes hierarchical levels AFTER contraction. One global "Show folder
+nodes" toggle restores them. The strategy partition overviews default to the
+level-wise hierarchical layout (Force is the toggle). The levels embedded below
+are the full-graph values (used when folder nodes are shown).
+
 Determinism: every iteration that affects output is sorted; the embedded JSON
 is dumped with sort_keys; no wall-clock, no randomness.
 

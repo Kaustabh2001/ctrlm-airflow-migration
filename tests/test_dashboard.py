@@ -53,6 +53,13 @@ def _stats(**overrides) -> dict:
 # ------------------------------------------------------------------ scope "fin"
 
 def _fin_scope() -> tuple[Deftable, CtmGraph, PartitionResult, PartitionResult]:
+    # v5.1: a synthetic folder-start node (desugar output) so the dashboard's
+    # default folder-node filtering + edge contraction has fixture data
+    start = Job(
+        name="__FOLDER_START__", folder="FIN", task_type="Dummy",
+        synthetic=True,
+        out_conds=[Condition(name="__FIN_START__")],
+    )
     load = Job(
         name="LOAD", folder="FIN", weekdays="1,2,3,4,5", timefrom="2100",
         day_pattern=WD_15,
@@ -68,7 +75,7 @@ def _fin_scope() -> tuple[Deftable, CtmGraph, PartitionResult, PartitionResult]:
         name="PUBLISH", folder="FIN",
         in_conds=[Condition(name="MART-OK")],
     )
-    jobs = [load, mart, publish]
+    jobs = [start, load, mart, publish]
 
     deftable = Deftable(
         folders=[FolderDef(name="FIN", datacenter="DC1", jobs=jobs)],
@@ -78,6 +85,8 @@ def _fin_scope() -> tuple[Deftable, CtmGraph, PartitionResult, PartitionResult]:
     graph = CtmGraph(
         nodes={j.uid: j for j in jobs},
         e_edges=[
+            GraphEdge(source="FIN/__FOLDER_START__", target="FIN/LOAD",
+                      cond="__FIN_START__"),
             GraphEdge(source="FIN/LOAD", target="FIN/MART", cond="LOADED"),
             GraphEdge(source="FIN/MART", target="FIN/PUBLISH", cond="MART-OK"),
         ],
@@ -487,11 +496,14 @@ def test_dashboard_levelwise_structure(tmp_path):
     assert "hierarchical" in html
     assert "'LR'" in html or '"LR"' in html
 
-    # longest-path node levels are computed in build.py and embedded
-    # (node dict keys are sorted by json.dumps: ..."id":X,"level":N,...)
-    assert '"id":"FIN/LOAD","level":0' in html
-    assert '"id":"FIN/MART","level":1' in html
-    assert '"id":"FIN/PUBLISH","level":2' in html
+    # longest-path node levels are computed in build.py over the FULL graph
+    # and embedded (used when folder nodes are shown; the default folder-less
+    # display recomputes levels in JS after edge contraction). Node dict keys
+    # are sorted by json.dumps: ..."id":X,"level":N,...
+    assert '"id":"FIN/__FOLDER_START__","level":0' in html
+    assert '"id":"FIN/LOAD","level":1' in html
+    assert '"id":"FIN/MART","level":2' in html
+    assert '"id":"FIN/PUBLISH","level":3' in html
     # cycle-guard flag present on every node (no cycles in the fixtures)
     assert '"cycle":false' in html and '"cycle":true' not in html
 
@@ -552,6 +564,55 @@ def test_dashboard_folder_toggle_and_overview_layout(tmp_path):
     # strategy overviews default to level-wise with a Force toggle
     assert 'id="olayout-components"' in html and 'id="olayout-single"' in html
     assert html.count('class="segbtn active" data-layout="level"') >= 2
+
+
+def test_dashboard_folder_nodes_hidden_by_default(tmp_path):
+    """V5.1: synthetic folder start/end nodes are display-filtered in EVERY
+    view by default. The full data (with synthetic / kind flags) stays
+    embedded so one global toggle can restore them; the template JS filters
+    the nodes, contracts edges transitively through them (tooltip notes
+    "via <folder> gate") and recomputes levels after contraction."""
+    a_dir, b_dir = _fixture_dirs(tmp_path)
+    out = tmp_path / "index.html"
+    html = _run_build(a_dir, b_dir, out)
+
+    # ONE global toggle, default OFF (unchecked input + JS state)
+    assert 'id="folder-toggle"' in html
+    assert "Show folder nodes" in html
+    assert '<input type="checkbox" id="folder-toggle">' in html  # no `checked`
+    assert "var showFolders = false" in html
+
+    # the flags the display filter keys on are embedded
+    assert '"id":"FIN/__FOLDER_START__"' in html
+    assert '"synthetic":true' in html                 # graph/structure views
+    assert '"kind":"folder_start"' in html            # strategy DAG graph view
+    assert '"kind":"folder_end"' in html
+
+    # filtering + transitive contraction machinery is part of the view code
+    assert "function visibleNodes" in html            # structure/full/overview
+    assert "function isFolderKind" in html            # dag_plans task filter
+    assert "function contractHidden" in html          # pred x succ, deduped
+    assert "function computeLevelsJS" in html         # levels AFTER contraction
+    assert "function viaText" in html                 # contracted-edge tooltip
+    assert "' gate'" in html                          # ..."via <folder> gate"
+
+
+def test_dashboard_overview_levelwise_default(tmp_path):
+    """V5.1: both strategy Partition overviews default to the hierarchical
+    level-wise layout (matching the structure view), with Force as toggle."""
+    a_dir, b_dir = _fixture_dirs(tmp_path)
+    out = tmp_path / "index.html"
+    html = _run_build(a_dir, b_dir, out)
+
+    # per-strategy layout toggle exists...
+    assert 'id="olayout-components"' in html
+    assert 'id="olayout-single"' in html
+    # ...defaults to level-wise (JS state + active segment button)
+    assert "var overviewLayout = { components: 'level', single: 'level' }" in html
+    # 3 Level-wise|Force toggles: structure + both strategy overviews
+    assert html.count('data-layout="level"') == 3
+    assert html.count('data-layout="force"') == 3
+    assert html.count('<button class="segbtn active" data-layout="level">Level-wise</button>') == 3
 
 
 def test_dashboard_missing_dag_plans_fails(tmp_path):
