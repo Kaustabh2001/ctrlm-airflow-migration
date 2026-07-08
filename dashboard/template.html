@@ -414,13 +414,13 @@
     S.w_edges.forEach(function (e) { bump(e.source); bump(e.target); });
   }
 
-  function tooltip(n) {
+  function tooltip(n, lvl) {
     var lines = [n.id];
     lines.push('scope: ' + currentScope);
     lines.push('folder: ' + n.folder + (n.synthetic ? '  (synthetic)' : ''));
     lines.push('type: ' + n.task_type + (n.cyclic ? '  · cyclic' : ''));
     lines.push('day pattern: ' + (n.day_pattern || 'condition-driven'));
-    lines.push('level: ' + n.level
+    lines.push('level: ' + lvl
       + (n.cycle ? '  · on a cycle — level approximated' : ''));
     if (n.timefrom) { lines.push('timefrom: ' + n.timefrom); }
     lines.push('dag (components): ' + (n.dag_a || '—'));
@@ -428,14 +428,17 @@
     return lines.join('\n');
   }
 
-  function makeNodes(keyFn, colorMap, withLevels) {
-    return S.nodes.map(function (n) {
+  /* v5.1: renders the given (already folder-filtered) node list; `levels` is
+     the post-contraction level map for hierarchical layouts, or null (force) */
+  function makeNodes(list, keyFn, colorMap, levels) {
+    return list.map(function (n) {
       var key = keyFn(n);
       var c = (key !== null && key !== undefined && colorMap[key]) || UNASSIGNED;
+      var lvl = levels ? (levels[n.id] || 0) : n.level;
       var node = {
         id: n.id,
         label: n.name,
-        title: tooltip(n),
+        title: tooltip(n, lvl),
         shape: n.cyclic ? 'hexagon' : (n.synthetic ? 'diamond' : 'dot'),
         size: 7 + Math.min(11, degree[n.id] || 0),
         borderWidth: 1,
@@ -447,7 +450,7 @@
         },
         font: { color: INK2, size: 11, face: 'system-ui', strokeWidth: 0 }
       };
-      if (withLevels) { node.level = n.level; }   /* drives hierarchical ranks */
+      if (levels) { node.level = lvl; }   /* drives hierarchical ranks */
       return node;
     });
   }
@@ -469,6 +472,154 @@
     };
   }
 
+  /* -------- v5.1: folder-node filtering + transitive edge contraction ---- */
+
+  function visibleNodes() {
+    if (showFolders) { return S.nodes; }
+    return S.nodes.filter(function (n) { return !n.synthetic; });
+  }
+
+  function hiddenNodeIds() {
+    if (showFolders) { return []; }
+    return S.nodes.filter(function (n) { return n.synthetic; })
+      .map(function (n) { return n.id; });
+  }
+
+  function isFolderKind(t) {
+    return t.kind === 'folder_start' || t.kind === 'folder_end';
+  }
+
+  /* folder of a removed structure node (graph.json nodes carry .folder) */
+  function structFolderOf(id) {
+    var n = nodeInfo[id];
+    return (n && n.folder) ? n.folder : id;
+  }
+
+  /* folder of a removed dag-plan task: source_uid is
+     "<FOLDER PATH>/__FOLDER_START__|__FOLDER_END__" for structural tasks */
+  function taskFolderOf(tasksById) {
+    return function (id) {
+      var t = tasksById[id];
+      if (t && t.source_uid) {
+        return t.source_uid.replace(/\/__FOLDER_(START|END)__$/, '');
+      }
+      return id;
+    };
+  }
+
+  function viaText(via) {
+    if (!via || !via.length) { return ''; }
+    return '\nvia ' + via.slice().sort().join(', ') + ' gate';
+  }
+
+  function condText(conds) {
+    return (conds || []).slice().sort().join(', ');
+  }
+
+  /* longest-path levels AFTER contraction (JS port of build.py's
+     compute_levels: roots = 0, cycle guard, deterministic sorted order). */
+  function computeLevelsJS(ids, pairs) {
+    ids = ids.slice().sort();
+    var known = {}, succ = {}, pred = {}, indeg = {};
+    ids.forEach(function (n) { known[n] = true; succ[n] = []; pred[n] = []; indeg[n] = 0; });
+    var seen = {};
+    pairs.slice().sort(function (a, b) {
+      var ka = a[0] + '\u0000' + a[1], kb = b[0] + '\u0000' + b[1];
+      return ka < kb ? -1 : (ka > kb ? 1 : 0);
+    }).forEach(function (p) {
+      var s = p[0], t = p[1], k = s + '\u0000' + t;
+      if (s === t || !known[s] || !known[t] || seen[k]) { return; }
+      seen[k] = true;
+      succ[s].push(t); pred[t].push(s); indeg[t] += 1;
+    });
+    var levels = {}, best = {}, remaining = {}, queue = [];
+    ids.forEach(function (n) {
+      remaining[n] = indeg[n];
+      if (indeg[n] === 0) { queue.push(n); }
+    });
+    while (queue.length) {
+      queue.sort();
+      var node = queue.shift();
+      levels[node] = best[node] || 0;
+      succ[node].forEach(function (nxt) {
+        best[nxt] = Math.max(best[nxt] || 0, levels[node] + 1);
+        remaining[nxt] -= 1;
+        if (remaining[nxt] === 0) { queue.push(nxt); }
+      });
+    }
+    /* cycle guard: sorted, so earlier approximations feed later ones */
+    ids.filter(function (n) { return !(n in levels); }).forEach(function (node) {
+      var got = pred[node].filter(function (p) { return p in levels; })
+        .map(function (p) { return levels[p]; });
+      levels[node] = got.length ? Math.max.apply(null, got) + 1 : 0;
+    });
+    return levels;
+  }
+
+  /* Contract edges transitively through every hidden node: each removed node
+     connects each of its predecessors to each of its successors (dedupe by
+     source|target, no self-edges). Contracted edges keep normal styling; the
+     tooltip notes "via <folder> gate". Edge recs:
+     {source, target, kind, mechanism, conds:[], via:[], dashed} */
+  function contractHidden(edges, hiddenIds, folderOf) {
+    var out = {}, order = [];
+    function key(s, t) { return s + '\u0000' + t; }
+    function mergeInto(list, items) {
+      (items || []).forEach(function (x) {
+        if (list.indexOf(x) < 0) { list.push(x); }
+      });
+    }
+    function addEdge(rec) {
+      var k = key(rec.source, rec.target);
+      var have = out[k];
+      if (!have) { out[k] = rec; order.push(k); return; }
+      mergeInto(have.conds, rec.conds);
+      mergeInto(have.via, rec.via);
+      if (rec.dashed && !have.dashed) {
+        have.dashed = true; have.kind = rec.kind; have.mechanism = rec.mechanism;
+      }
+    }
+    edges.forEach(function (e) {
+      if (e.source === e.target) { return; }
+      addEdge({
+        source: e.source, target: e.target,
+        kind: e.kind || 'E', mechanism: e.mechanism || '',
+        conds: (e.conds || []).slice(), via: (e.via || []).slice(),
+        dashed: !!e.dashed
+      });
+    });
+    hiddenIds.slice().sort().forEach(function (h) {
+      var ins = [], outs = [];
+      order.forEach(function (k) {
+        var e = out[k];
+        if (!e) { return; }
+        if (e.target === h) { ins.push(e); }
+        if (e.source === h) { outs.push(e); }
+        if (e.source === h || e.target === h) { delete out[k]; }
+      });
+      order = order.filter(function (k) { return out[k]; });
+      var label = folderOf(h);
+      ins.forEach(function (pe) {
+        outs.forEach(function (se) {
+          if (pe.source === se.target) { return; }   /* no self-edges */
+          var via = pe.via.slice();
+          mergeInto(via, [label]);
+          mergeInto(via, se.via);
+          var conds = pe.conds.slice();
+          mergeInto(conds, se.conds);
+          addEdge({
+            source: pe.source, target: se.target,
+            kind: pe.dashed ? pe.kind : (se.dashed ? se.kind : pe.kind),
+            mechanism: pe.dashed ? pe.mechanism : (se.dashed ? se.mechanism : (pe.mechanism || se.mechanism)),
+            conds: conds, via: via,
+            dashed: pe.dashed || se.dashed
+          });
+        });
+      });
+    });
+    return Object.keys(out).sort().map(function (k) { return out[k]; });
+  }
+
   /* ---------------- legends ---------------- */
 
   function legendEl(view) { return document.getElementById('legend-' + view); }
@@ -482,14 +633,18 @@
       + '</div>';
   }
 
-  function renderFolderLegend(view, cmap) {
+  function renderFolderLegend(view, cmap, eCount) {
     var html = '<h2>Folders</h2>';
     S.folders.forEach(function (f) {
       html += lrow(cmap[f.name] || UNASSIGNED, f.name, f.n_jobs + ' jobs',
         { badge: (f.smart ? 'smart' : null), click: 'folder:' + f.name });
       if (f.datacenter) { html += '<div class="lnote">' + esc(f.datacenter) + '</div>'; }
     });
-    html += '<h2>Edges</h2>' + lrow(EDGE_NEUTRAL, 'condition (E)', S.e_edges.length, { line: true });
+    html += '<h2>Edges</h2>' + lrow(EDGE_NEUTRAL, 'condition (E)', eCount, { line: true });
+    if (!showFolders) {
+      html += '<div class="lnote">folder start/end nodes hidden — edges are '
+        + 'contracted through them (toggle in the header)</div>';
+    }
     legendEl(view).innerHTML = html;
   }
 
@@ -512,7 +667,7 @@
   }
 
   /* kinds legend for the per-DAG task-graph sub-mode (v5) */
-  function renderDagGraphLegend(view, strat, dagId, plan) {
+  function renderDagGraphLegend(view, strat, dagId, plan, shown) {
     var html = '<h2>DAG</h2>';
     if (!plan) {
       html += '<div class="empty">no dag_plans entry for ' + esc(dagId) + '</div>';
@@ -524,12 +679,17 @@
     html += '<div class="lrow"><span class="lname" title="' + esc(dagId) + '">'
       + esc(dagId) + '</span><span class="lcount">' + plan.tasks.length + ' tasks</span></div>';
     html += '<div class="lnote">' + esc(sched) + '</div>';
+    if (shown.length < plan.tasks.length) {
+      html += '<div class="lnote">' + (plan.tasks.length - shown.length)
+        + ' folder start/end task(s) hidden — edges contracted through them '
+        + '(toggle in the header)</div>';
+    }
     plan.datasets.forEach(function (ds) {
       html += '<div class="lnote">' + esc(ds) + '</div>';
     });
 
     var counts = {};
-    plan.tasks.forEach(function (t) {
+    shown.forEach(function (t) {
       var st = TASK_KINDS[t.kind] || TASK_KINDS.job;
       counts[st.label] = (counts[st.label] || 0) + 1;
     });
@@ -588,64 +748,97 @@
   function buildStructure() {
     var hier = structureLayout === 'level';
     var cmap = categoryColors(S.folders.map(function (f) { return f.name; }));
-    var edges = S.e_edges.map(function (e) {
-      return edgeObj(e.source, e.target,
-        { color: EDGE_NEUTRAL, hier: hier, title: 'E — ' + e.conds.join(', ') });
+    var vnodes = visibleNodes();
+    var contracted = contractHidden(S.e_edges.map(function (e) {
+      return { source: e.source, target: e.target, kind: 'E', conds: e.conds };
+    }), hiddenNodeIds(), structFolderOf);
+    var edges = contracted.map(function (e) {
+      return edgeObj(e.source, e.target, {
+        color: EDGE_NEUTRAL, hier: hier,
+        title: 'E — ' + condText(e.conds) + viaText(e.via)
+      });
     });
-    renderFolderLegend('structure', cmap);
+    /* levels for the hierarchical layout are computed AFTER contraction */
+    var levels = hier
+      ? computeLevelsJS(vnodes.map(function (n) { return n.id; }),
+          contracted.map(function (e) { return [e.source, e.target]; }))
+      : null;
+    renderFolderLegend('structure', cmap, edges.length);
     return {
-      nodes: makeNodes(function (n) { return n.folder; }, cmap, hier),
+      nodes: makeNodes(vnodes, function (n) { return n.folder; }, cmap, levels),
       edges: edges,
       hier: hier
     };
   }
 
   function buildStrategy(view, strat, keyFn, dagKey) {
+    /* v5.1: level-wise hierarchical layout by DEFAULT (Force is the toggle);
+       levels are longest-path over the union of intra-DAG edges and
+       cross-links, computed after folder-node contraction. */
+    var hier = overviewLayout[view] === 'level';
     var cmap = categoryColors(strat.dags.map(function (d) { return d.dag_id; }));
-    var edges = [];
-    S.e_edges.forEach(function (e) {
-      var a = nodeInfo[e.source], b = nodeInfo[e.target];
-      if (!a || !b) { return; }
-      var da = keyFn(a), db = keyFn(b);
-      if (da && da === db) {
-        edges.push(edgeObj(e.source, e.target,
-          { color: EDGE_NEUTRAL, title: 'intra-DAG — ' + e.conds.join(', ') }));
-      }
+    var raw = S.e_edges.map(function (e) {
+      return { source: e.source, target: e.target, kind: 'E', conds: e.conds };
     });
     strat.cross_links.forEach(function (c) {
-      if (!nodeInfo[c.source] || !nodeInfo[c.target]) { return; }
-      edges.push(edgeObj(c.source, c.target, {
-        color: kindColor(c.kind), dashed: true,
-        title: 'cross-DAG ' + c.kind + ' via ' + c.mechanism + ' — ' + c.conds.join(', ')
-      }));
+      raw.push({
+        source: c.source, target: c.target, kind: c.kind,
+        mechanism: c.mechanism, conds: c.conds, dashed: true
+      });
     });
+    var edges = [], pairs = [];
+    contractHidden(raw, hiddenNodeIds(), structFolderOf).forEach(function (e) {
+      var a = nodeInfo[e.source], b = nodeInfo[e.target];
+      if (!a || !b) { return; }
+      if (e.dashed) {           /* cross-DAG link (possibly contracted) */
+        edges.push(edgeObj(e.source, e.target, {
+          color: kindColor(e.kind), dashed: true, hier: hier,
+          title: 'cross-DAG ' + e.kind + ' via ' + e.mechanism + ' — '
+            + condText(e.conds) + viaText(e.via)
+        }));
+        pairs.push([e.source, e.target]);
+        return;
+      }
+      var da = keyFn(a), db = keyFn(b);
+      if (da && da === db) {
+        edges.push(edgeObj(e.source, e.target, {
+          color: EDGE_NEUTRAL, hier: hier,
+          title: 'intra-DAG — ' + condText(e.conds) + viaText(e.via)
+        }));
+        pairs.push([e.source, e.target]);
+      }
+    });
+    var vnodes = visibleNodes();
+    var levels = hier
+      ? computeLevelsJS(vnodes.map(function (n) { return n.id; }), pairs)
+      : null;
     renderDagLegend(view, strat, cmap, dagKey);
-    return { nodes: makeNodes(keyFn, cmap), edges: edges };
+    return { nodes: makeNodes(vnodes, keyFn, cmap, levels), edges: edges, hier: hier };
   }
 
   /* -------- per-DAG task graph (v5): dag_plans.json, hierarchical LR ----- */
 
-  function taskTooltip(t, dagId) {
+  function taskTooltip(t, dagId, lvl) {
     var lines = [t.task_id];
     lines.push('dag: ' + dagId);
     lines.push('kind: ' + t.kind + '  · operator: ' + t.operator);
     if (t.source_uid) { lines.push('Control-M job: ' + t.source_uid); }
     if (t.task_group) { lines.push('task group: ' + t.task_group); }
     lines.push('upstream: ' + t.upstream.length);
-    lines.push('level: ' + t.level
+    lines.push('level: ' + lvl
       + (t.cycle ? '  · on a cycle — level approximated' : ''));
     return lines.join('\n');
   }
 
-  function taskNode(t, dagId, shift) {
+  function taskNode(t, dagId, lvl) {
     var st = TASK_KINDS[t.kind] || TASK_KINDS.job;
     var inside = st.shape === 'box' || st.shape === 'ellipse';
     var bg = st.fill ? st.color : '#232322';
     return {
       id: t.task_id,
       label: t.task_id + (t.kind === 'job' && t.operator ? '\n' + t.operator : ''),
-      title: taskTooltip(t, dagId),
-      level: t.level + shift,
+      title: taskTooltip(t, dagId, lvl),
+      level: lvl,
       shape: st.shape,
       size: st.size || 12,
       borderWidth: st.dashes ? 1.6 : 1,
@@ -689,29 +882,54 @@
   function buildDagGraph(view, strat) {
     var dagId = stratDag[view];
     var plan = strat.dag_plans[dagId];
-    renderDagGraphLegend(view, strat, dagId, plan);
-    if (!plan) { return { nodes: [], edges: [], hier: true }; }
+    if (!plan) {
+      renderDagGraphLegend(view, strat, dagId, plan, []);
+      return { nodes: [], edges: [], hier: true };
+    }
+
+    /* v5.1: folder_start / folder_end tasks are hidden by default; their
+       edges are contracted transitively and levels recomputed afterwards. */
+    var tasksById = {};
+    plan.tasks.forEach(function (t) { tasksById[t.task_id] = t; });
+    var shown = plan.tasks.filter(function (t) {
+      return showFolders || !isFolderKind(t);
+    });
+    var hidden = plan.tasks.filter(function (t) {
+      return !showFolders && isFolderKind(t);
+    }).map(function (t) { return t.task_id; });
+    renderDagGraphLegend(view, strat, dagId, plan, shown);
+
+    var raw = [];
+    plan.tasks.forEach(function (t) {
+      t.upstream.forEach(function (u) {
+        if (!tasksById[u]) { return; }
+        raw.push({ source: u, target: t.task_id, kind: 'E', conds: [] });
+      });
+    });
+    var contracted = contractHidden(raw, hidden, taskFolderOf(tasksById));
 
     /* dataset-triggered DAGs get ghost inbound datasets at rank 0 */
     var shift = (plan.dataset_triggered && plan.datasets.length) ? 1 : 0;
+    var base = computeLevelsJS(
+      shown.map(function (t) { return t.task_id; }),
+      contracted.map(function (e) { return [e.source, e.target]; }));
     var nodes = [], edges = [];
-    var have = {}, levelOf = {};
-    plan.tasks.forEach(function (t) {
-      have[t.task_id] = true;
-      levelOf[t.task_id] = t.level + shift;
-    });
+    var levelOf = {}, hasUpstream = {};
+    shown.forEach(function (t) { levelOf[t.task_id] = (base[t.task_id] || 0) + shift; });
+    contracted.forEach(function (e) { hasUpstream[e.target] = true; });
 
-    plan.tasks.forEach(function (t) {
-      nodes.push(taskNode(t, dagId, shift));
-      t.upstream.forEach(function (u) {
-        if (!have[u]) { return; }
-        edges.push(edgeObj(u, t.task_id,
-          { color: EDGE_NEUTRAL, hier: true, title: u + ' → ' + t.task_id }));
-      });
+    shown.forEach(function (t) {
+      nodes.push(taskNode(t, dagId, levelOf[t.task_id]));
+    });
+    contracted.forEach(function (e) {
+      edges.push(edgeObj(e.source, e.target, {
+        color: EDGE_NEUTRAL, hier: true,
+        title: e.source + ' → ' + e.target + viaText(e.via)
+      }));
     });
 
     if (shift) {
-      var roots = plan.tasks.filter(function (t) { return t.upstream.length === 0; });
+      var roots = shown.filter(function (t) { return !hasUpstream[t.task_id]; });
       plan.datasets.forEach(function (ds) {
         var gid = 'ghost_ds_in:' + ds;
         nodes.push(ghostNode(gid, ds, 0,
@@ -722,19 +940,51 @@
       });
     }
 
+    /* nearest VISIBLE upstream tasks of a hidden folder task (deterministic) */
+    function visibleAnchorsUp(id) {
+      var seen = {}, found = {}, stack = [id];
+      while (stack.length) {
+        var cur = stack.pop();
+        if (seen[cur]) { continue; }
+        seen[cur] = true;
+        var t = tasksById[cur];
+        if (!t) { continue; }
+        t.upstream.forEach(function (u) {
+          if (!tasksById[u]) { return; }
+          if (u in levelOf) { found[u] = true; } else { stack.push(u); }
+        });
+      }
+      return Object.keys(found).sort();
+    }
+
     plan.outlets.forEach(function (o) {
       var gid = 'ghost_ds_out:' + o.task_id + ':' + o.dataset;
-      nodes.push(ghostNode(gid, o.dataset,
-        (levelOf[o.task_id] || 0) + 1,
-        'outlet dataset (produced by ' + o.task_id + ')\n' + o.dataset, 'database'));
-      edges.push(ghostEdge(o.task_id, gid, o.task_id + ' → dataset'));
+      if (o.task_id in levelOf) {
+        nodes.push(ghostNode(gid, o.dataset,
+          levelOf[o.task_id] + 1,
+          'outlet dataset (produced by ' + o.task_id + ')\n' + o.dataset, 'database'));
+        edges.push(ghostEdge(o.task_id, gid, o.task_id + ' → dataset'));
+        return;
+      }
+      /* producer is a hidden folder node: re-home onto its visible upstreams */
+      var anchors = visibleAnchorsUp(o.task_id);
+      var lvl = shift;
+      anchors.forEach(function (a) { lvl = Math.max(lvl, levelOf[a] + 1); });
+      nodes.push(ghostNode(gid, o.dataset, lvl,
+        'outlet dataset (produced by ' + o.task_id
+        + ' — hidden folder node)\n' + o.dataset, 'database'));
+      anchors.forEach(function (a) {
+        edges.push(ghostEdge(a, gid,
+          a + ' → dataset' + viaText([taskFolderOf(tasksById)(o.task_id)])));
+      });
     });
 
     plan.external_waits.forEach(function (w) {
+      if (!(w.task_id in levelOf)) { return; }
       var ext = w.external_dag_id + '.' + w.external_task_id;
       var gid = 'ghost_ext:' + w.task_id + ':' + ext;
       nodes.push(ghostNode(gid, ext,
-        (levelOf[w.task_id] || 0) - 1,
+        levelOf[w.task_id] - 1,
         'external task (in another DAG)\n' + ext + '\nawaited by ' + w.task_id, 'box'));
       edges.push(ghostEdge(gid, w.task_id, ext + ' → ' + w.task_id));
     });
@@ -744,19 +994,28 @@
 
   function buildFull() {
     var cmap = categoryColors(S.folders.map(function (f) { return f.name; }));
+    var raw = [];
+    S.e_edges.forEach(function (e) {
+      raw.push({ source: e.source, target: e.target, kind: e.kind, conds: e.conds });
+    });
+    S.w_edges.forEach(function (e) {
+      raw.push({ source: e.source, target: e.target, kind: e.kind,
+                 conds: e.conds, dashed: true });
+    });
     var kindCounts = {};
     var edges = [];
-    function add(e, dashed) {
+    contractHidden(raw, hiddenNodeIds(), structFolderOf).forEach(function (e) {
       kindCounts[e.kind] = (kindCounts[e.kind] || 0) + 1;
       edges.push(edgeObj(e.source, e.target, {
-        color: kindColor(e.kind), dashed: dashed,
-        title: e.kind + ' — ' + e.conds.join(', ')
+        color: kindColor(e.kind), dashed: e.dashed,
+        title: e.kind + ' — ' + condText(e.conds) + viaText(e.via)
       }));
-    }
-    S.e_edges.forEach(function (e) { add(e, false); });
-    S.w_edges.forEach(function (e) { add(e, true); });
+    });
     renderKindLegend('full', kindCounts);
-    return { nodes: makeNodes(function (n) { return n.folder; }, cmap), edges: edges };
+    return {
+      nodes: makeNodes(visibleNodes(), function (n) { return n.folder; }, cmap),
+      edges: edges
+    };
   }
 
   /* ---------------- networks: build lazily per scope, freeze on settle -- */
@@ -835,7 +1094,8 @@
         var sel = row.getAttribute('data-sel').split(':');
         var field = sel[0], value = sel.slice(1).join(':');
         var ids = S.nodes.filter(function (n) { return n[field] === value; })
-          .map(function (n) { return n.id; });
+          .map(function (n) { return n.id; })
+          .filter(function (id) { return nodesDS.get(id) !== null; });
         if (ids.length) {
           net.selectNodes(ids);
           net.fit({ nodes: ids, animation: true });
@@ -890,6 +1150,32 @@
     });
   });
 
+  /* v5.1: ONE global toggle restores folder nodes in ALL views (default off) */
+  var folderToggle = document.getElementById('folder-toggle');
+  folderToggle.checked = showFolders;
+  folderToggle.addEventListener('change', function () {
+    showFolders = folderToggle.checked;
+    Object.keys(built).forEach(function (v) { built[v].net.destroy(); });
+    built = {};
+    ensureNetwork(active);
+  });
+
+  /* v5.1: per-strategy overview layout toggle (Level-wise default | Force) */
+  document.querySelectorAll('.olayout').forEach(function (seg) {
+    var view = seg.getAttribute('data-strat');
+    seg.querySelectorAll('.segbtn').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var mode = b.getAttribute('data-layout');
+        if (mode === overviewLayout[view]) { return; }
+        overviewLayout[view] = mode;
+        seg.querySelectorAll('.segbtn').forEach(function (x) {
+          x.classList.toggle('active', x === b);
+        });
+        if (stratMode[view] === 'overview') { rebuild(view); }
+      });
+    });
+  });
+
   document.querySelectorAll('.mode-toggle').forEach(function (seg) {
     var view = seg.getAttribute('data-strat');
     seg.querySelectorAll('.segbtn').forEach(function (b) {
@@ -901,6 +1187,7 @@
           x.classList.toggle('active', x === b);
         });
         document.getElementById('dagpick-' + view).hidden = (mode !== 'dag');
+        document.getElementById('olayout-wrap-' + view).hidden = (mode === 'dag');
         rebuild(view);
       });
     });

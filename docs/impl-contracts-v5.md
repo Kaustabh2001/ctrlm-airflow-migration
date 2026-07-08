@@ -84,6 +84,17 @@ otherwise keep the existing dark theme and colorblind-safe palette.
   selector present per strategy, ghost/external stub markers present, kinds
   legend present, still zero external http(s) refs.
 
+## V5.1 (view refinements — user decisions)
+
+- Synthetic folder start/end nodes are hidden in EVERY dashboard view by
+  default; dependencies are transitively contracted through them (tooltip/
+  legend notes the folder gate). One global "Show folder nodes" toggle
+  restores them everywhere. Display-level only: the generated DAG .py files
+  keep their EmptyOperator gate tasks (they carry folder-level condition
+  wiring at runtime).
+- Strategy "Partition overview" views default to the hierarchical level-wise
+  layout (same style as the structure view), with Force as the toggle.
+
 ## Integration + verification (single agent, combined)
 
 Run full pytest and fix fallout; regenerate output/components,

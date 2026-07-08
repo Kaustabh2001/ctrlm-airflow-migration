@@ -533,6 +533,27 @@ def test_dashboard_dag_graph_view(tmp_path):
         assert marker in html, f"dag_plans marker {marker} not embedded"
 
 
+def test_dashboard_folder_toggle_and_overview_layout(tmp_path):
+    """v5.1: folder gate nodes hidden by default (with edge contraction) and
+    partition overviews default to the level-wise layout."""
+    a_dir, b_dir = _fixture_dirs(tmp_path)
+    out = tmp_path / "index.html"
+    html = _run_build(a_dir, b_dir, out)
+
+    # global toggle exists and defaults off (showFolders = false)
+    assert 'id="folder-toggle"' in html
+    assert "Show folder nodes" in html
+    assert "var showFolders = false" in html
+
+    # display-level filtering + transitive contraction machinery is present
+    assert "visibleNodes" in html and "hiddenNodeIds" in html
+    assert "contract" in html  # contraction note/logic
+
+    # strategy overviews default to level-wise with a Force toggle
+    assert 'id="olayout-components"' in html and 'id="olayout-single"' in html
+    assert html.count('class="segbtn active" data-layout="level"') >= 2
+
+
 def test_dashboard_missing_dag_plans_fails(tmp_path):
     """v5 requires <scope>/dag_plans.json; a pre-v5 tree must fail loudly."""
     a_dir, b_dir = _fixture_dirs(tmp_path)
