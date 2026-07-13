@@ -12,14 +12,16 @@ Registers:
 
 The targeted operators (CtmDatabaseJob, CtmManualJob), the sensors
 (CtmApprovalGateSensor, CtmFileWatcherSensor) and the callbacks (ctm_shout)
-need no plugin-manager registration in Airflow 2: generated DAGs import them
-directly from ``ctm_plugins.operators`` / ``ctm_plugins.sensors`` /
+need no plugin-manager registration (neither in Airflow 2 nor 3): generated
+DAGs import them directly from ``ctm_plugins.operators`` / ``ctm_plugins.sensors`` /
 ``ctm_plugins.callbacks``. Importing them here still validates at plugin-load
 time that the whole ctm_plugins package (and its provider dependencies) is
 importable, and keeps a single inventory of everything the package ships.
 """
 from __future__ import annotations
 
+# Path verified UNCHANGED in Airflow 3: AirflowPlugin still lives in
+# airflow.plugins_manager, so no 2.x/3.x compat shim is needed here (V6-2).
 from airflow.plugins_manager import AirflowPlugin
 
 from ctm_plugins._odate import ctm_odate, gate_target
@@ -33,7 +35,7 @@ class CtmPlugin(AirflowPlugin):
     # exposed as macros.ctm_odate / macros.gate_target in all templates
     macros = [ctm_odate, gate_target]
     timetables = [CtmCalendarTimetable]
-    # Inventory of the operator/sensor family (informational in Airflow 2 —
+    # Inventory of the operator/sensor family (informational on 2.x and 3.x —
     # DAGs import these classes directly; listing them keeps the shipped
     # surface visible in one place and fails fast on import errors).
     ctm_operators = [CtmDatabaseJob, CtmManualJob]

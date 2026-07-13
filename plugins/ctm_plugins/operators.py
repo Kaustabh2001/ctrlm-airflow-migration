@@ -27,7 +27,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from airflow.models.baseoperator import BaseOperator
+# Airflow 3 / 2.x dual-compat: BaseOperator comes via the _compat shim
+# (airflow.sdk on 3.x, airflow.models.baseoperator on 2.x). See _compat.py.
+from ._compat import BaseOperator
+
+# Provider path verified UNCHANGED in Airflow 3 (common.sql provider).
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 
 from ._params import resolve_node

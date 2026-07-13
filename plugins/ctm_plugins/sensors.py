@@ -16,8 +16,9 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from airflow.models import Variable
-from airflow.sensors.base import BaseSensorOperator
+# Airflow 3 / 2.x dual-compat: both bases come via the _compat shim
+# (airflow.sdk on 3.x; airflow.sensors.base / airflow.models on 2.x).
+from ._compat import BaseSensorOperator, Variable
 
 # One Control-M day by default: an unanswered CONFIRM should not hang forever.
 DEFAULT_CONFIRM_TIMEOUT = 24 * 3600
@@ -49,7 +50,9 @@ class CtmApprovalGateSensor(BaseSensorOperator):
 
     def poke(self, context: dict) -> bool:
         key = self.approval_key(context)
-        value = Variable.get(key, default_var="")
+        # default passed POSITIONALLY: the kwarg was renamed in Airflow 3
+        # (2.x default_var= -> 3.x default=); positional works on both.
+        value = Variable.get(key, "")
         approved = str(value).strip().lower() == "yes"
         if not approved:
             self.log.info(
@@ -87,6 +90,7 @@ class CtmFileWatcherSensor(BaseSensorOperator):
         path = self.path
         if path.startswith("s3://"):
             # LATE import: amazon provider is only needed for s3:// watches.
+            # Provider path verified UNCHANGED in Airflow 3.
             from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 
             hook = S3Hook(aws_conn_id=self.conn_id or "aws_default")
@@ -95,6 +99,7 @@ class CtmFileWatcherSensor(BaseSensorOperator):
             return hook.check_for_key(key, bucket_name=bucket)
         if path.startswith("sftp://"):
             # LATE import: sftp provider only needed for sftp:// watches.
+            # Provider path verified UNCHANGED in Airflow 3.
             from airflow.providers.sftp.hooks.sftp import SFTPHook
 
             rest = path[len("sftp://"):]

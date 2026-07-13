@@ -205,6 +205,24 @@ def test_one_file_per_dag_and_all_compile(emitted):
         py_compile.compile(str(p), doraise=True)  # raises on syntax error
 
 
+def test_airflow3_dag_decorator_and_module_bottom_call(emitted):
+    """V6-1: @dag-decorated function per DAG + module-bottom call — no
+    `with DAG(`, no airflow.datasets, no sla= anywhere in emitted code."""
+    _, texts, _ = emitted
+    for dag_id, text in texts.items():
+        assert "@dag(" in text, dag_id
+        assert f'dag_id="{dag_id}"' in text, dag_id
+        assert f"def {dag_id}():" in text, dag_id
+        # module-bottom call: the LAST non-empty line is `<dag_id>()`
+        last = [l for l in text.splitlines() if l.strip()][-1]
+        assert last == f"{dag_id}()", dag_id
+        assert "with DAG(" not in text, dag_id
+        assert "from airflow import DAG" not in text, dag_id
+        assert "airflow.datasets" not in text, dag_id
+        assert "Dataset(" not in text, dag_id
+        assert "sla=" not in text, dag_id
+
+
 def test_provenance_header(emitted):
     _, texts, _ = emitted
     fin = texts["fin_dw"]
@@ -231,6 +249,8 @@ def test_task_type_mapping(emitted):
     assert 'ssh_conn_id="ssh_nodeX"' in fin  # unmapped NODEID fallback
     # Dummy -> EmptyOperator; FileWatch -> CtmFileWatcherSensor (v3 registry)
     assert "EmptyOperator" in fin
+    # Airflow 3: EmptyOperator moved to the standard provider
+    assert "from airflow.providers.standard.operators.empty import EmptyOperator" in fin
     assert "CtmFileWatcherSensor" in stg
     assert "from ctm_plugins.sensors import CtmFileWatcherSensor" in stg
     assert 'mode="reschedule"' in stg
@@ -258,6 +278,14 @@ def test_time_gates_with_day_offset(emitted):
     _, texts, _ = emitted
     fin = texts["fin_dw"]
     assert "DateTimeSensorAsync" in fin
+    # Airflow 3 standard-provider import + the CORRECT kwarg (target_time —
+    # target_datetime never existed on DateTimeSensor/Async)
+    assert (
+        "from airflow.providers.standard.sensors.date_time import DateTimeSensorAsync"
+        in fin
+    )
+    assert "target_time=" in fin
+    assert "target_datetime" not in fin
     # MART at 2300 (same ODATE day as the 2100 anchor): days=0
     assert 'task_id="gate_mart"' in fin
     assert "macros.timedelta(days=0)).replace(hour=23, minute=0)" in fin
@@ -275,6 +303,11 @@ def test_consumer_side_sensors(emitted):
     _, texts, _ = emitted
     risk = texts["risk"]
     assert "ExternalTaskSensor" in risk
+    # Airflow 3: the sensor moved to the standard provider
+    assert (
+        "from airflow.providers.standard.sensors.external_task import ExternalTaskSensor"
+        in risk
+    )
     assert 'external_dag_id="fin_dw"' in risk
     # producer sits inside a TaskGroup -> group-prefixed external_task_id
     assert 'external_task_id="fin_dw.extract"' in risk
@@ -287,11 +320,12 @@ def test_consumer_side_sensors(emitted):
     assert "wait_load >> calc" in risk
 
 
-def test_producer_outlets_and_dataset_schedule(emitted):
+def test_producer_outlets_and_asset_schedule(emitted):
+    # Airflow 3: Datasets were renamed Assets (airflow.sdk import)
     _, texts, _ = emitted
-    assert 'outlets=[Dataset("ctrlm://cond/FIN-OK")]' in texts["fin_dw"]
-    assert 'schedule=[Dataset("ctrlm://cond/FIN-OK")]' in texts["stg"]
-    assert "from airflow.datasets import Dataset" in texts["stg"]
+    assert 'outlets=[Asset("ctrlm://cond/FIN-OK")]' in texts["fin_dw"]
+    assert 'schedule=[Asset("ctrlm://cond/FIN-OK")]' in texts["stg"]
+    assert "from airflow.sdk import Asset, dag" in texts["stg"]
 
 
 def test_dag_kwargs_and_conditional_imports(emitted):
@@ -304,12 +338,15 @@ def test_dag_kwargs_and_conditional_imports(emitted):
     assert "catchup=False" in fin
     assert '"ctrlm"' in fin and '"strategy:components"' in fin
     assert '"folder:FIN_DW"' in fin and '"folder:RPT"' in fin
-    # imports only what each file uses
+    # imports only what each file uses — ONE airflow.sdk authoring line each
     assert "ExternalTaskSensor" not in fin  # fin_dw consumes nothing
     assert "DateTimeSensorAsync" not in stg
     assert "SSHOperator" not in texts["risk"] or "SSHOperator" in risk  # risk has SSH
-    assert "from airflow.utils.task_group import TaskGroup" not in stg
-    assert "from airflow import DAG" in stg
+    assert "from airflow.sdk import Asset, TaskGroup, dag" in fin
+    assert "from airflow.sdk import Asset, dag" in stg  # no TaskGroup
+    assert "from airflow.sdk import dag" in risk  # neither Asset nor TaskGroup
+    assert "TaskGroup" not in stg
+    assert "from airflow.utils.task_group import TaskGroup" not in fin  # 2.x path
 
 
 def test_diagnostics_appended(emitted):
@@ -618,7 +655,7 @@ def test_unknown_appl_type_hits_catch_all(tmp_path: Path):
 
 def test_bank_settle_full_param_mapping(tmp_path: Path):
     """The verifier scenario: priority/critical, pool, callback+email,
-    DOFORCEJOB resolved in scope, SHOUT LATE -> sla."""
+    DOFORCEJOB resolved in scope, SHOUT LATE -> TODO + SLA_AF3_REMOVED."""
     from ctrlm_core.model import OnAction, Resource
 
     settle = _job(
@@ -676,18 +713,28 @@ def test_bank_settle_full_param_mapping(tmp_path: Path):
     assert 'email=["ops@corp.com"]' in text
     assert "email_on_failure=True" in text
     assert "from ctm_plugins.callbacks import ctm_shout" in text
-    # DOFORCEJOB -> downstream TriggerDagRunOperator, resolved via assignments
-    assert "from airflow.operators.trigger_dagrun import TriggerDagRunOperator" in text
+    # DOFORCEJOB -> downstream TriggerDagRunOperator (standard provider, v6)
+    assert (
+        "from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator"
+        in text
+    )
     assert 'task_id="force_bank_recon"' in text
     assert 'trigger_dag_id="bank_recon_dag"' in text
     assert 'trigger_rule="one_failed"' in text
     assert "bank_settle >> force_bank_recon" in text
     assert not any(d.code == "FORCEJOB_UNRESOLVED" for d in result.diagnostics)
-    # SHOUT LATE -> sla (2300 - 1900 = 240 minutes)
-    assert "sla=timedelta(minutes=240)" in text
-    assert ("SLA_APPROX", settle.uid) in {
+    # SHOUT LATE: Airflow 3 removed sla — TODO comment naming the late window
+    # (2300 - 1900 = 240 minutes) + SLA_AF3_REMOVED diagnostic, NO sla= kwarg
+    assert "sla=" not in text
+    assert (
+        "# TODO Airflow 3 removed SLAs; map to Deadline Alerts (3.1+): "
+        "late after 240m" in text
+    )
+    assert ("SLA_AF3_REMOVED", settle.uid) in {
         (d.code, d.subject) for d in result.diagnostics
     }
+    late = next(d for d in result.diagnostics if d.code == "SLA_AF3_REMOVED")
+    assert "BANK_SETTLE" in late.message and "240m" in late.message
     # pools.json next to the dags dir
     pools = json.loads(
         (out_root / "config" / "pools.json").read_text(encoding="utf-8")
@@ -721,7 +768,7 @@ def test_confirm_upstream_approval_gate(tmp_path: Path):
     assert "ctm_approve/" in text  # how-to-approve comment
 
 
-def test_docond_add_extra_dataset_outlet(tmp_path: Path):
+def test_docond_add_extra_asset_outlet(tmp_path: Path):
     from ctrlm_core.model import OnAction
 
     job = _job(
@@ -731,8 +778,9 @@ def test_docond_add_extra_dataset_outlet(tmp_path: Path):
                                        "SIGN": "ADD"}])],
     )
     text, _, _ = _emit_jobs(tmp_path, [job])
-    assert 'outlets=[Dataset("ctrlm://cond/EXTRA-OK")]' in text
-    assert "from airflow.datasets import Dataset" in text
+    assert 'outlets=[Asset("ctrlm://cond/EXTRA-OK")]' in text
+    assert "from airflow.sdk import Asset, dag" in text
+    assert "airflow.datasets" not in text
 
 
 def test_unmapped_do_action_todo_and_diagnostic(tmp_path: Path):

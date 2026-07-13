@@ -1,14 +1,15 @@
 # CLAUDE.md — agent onboarding
 
-Converts Control-M job-definition XML exports into Airflow DAGs (target: AWS
-MWAA), with TWO partitioning strategies run side by side plus an offline
+Converts Control-M job-definition XML exports into Airflow DAGs (target:
+Airflow 3 on AWS MWAA; `@dag` authoring style, `airflow.sdk` imports, Assets),
+with TWO partitioning strategies run side by side plus an offline
 comparison dashboard. Everything is **deterministic**: same input + config →
 byte-identical output. No AI/LLM runs at conversion time.
 
 ## Commands (Windows; venv at `venv/`)
 
 ```powershell
-venv\Scripts\python -m pytest tests -q                                        # 285 tests
+venv\Scripts\python -m pytest tests -q                                        # 326 tests
 venv\Scripts\python strategy_components\run.py examples\exports -o output\components
 venv\Scripts\python strategy_single_entry\run.py examples\exports -o output\single_entry
 venv\Scripts\python dashboard\build.py --a output\components --b output\single_entry -o output\dashboard\index.html

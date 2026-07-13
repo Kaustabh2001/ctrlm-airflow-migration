@@ -10,7 +10,8 @@ imports/comments, upstream/downstream helper tasks, diagnostics).
 On top of operator selection, :func:`apply_common_params` applies the
 param-by-param Control-M -> Airflow mapping that holds for EVERY task
 regardless of operator (retries, retry_delay, doc_md, priority_weight,
-CONFIRM gate, pools, params, ON/DO actions, SLA...). The user-facing
+CONFIRM gate, pools, params, ON/DO actions...; Airflow 3 removed the ``sla``
+param, so SHOUT WHEN LATE degrades to a TODO + diagnostic). The user-facing
 documentation lives in docs/job-mapping-catalog.md and is kept in sync with
 this module by tests/test_registry.py.
 
@@ -125,7 +126,7 @@ class TaskPlan:
     imports: list[str] = field(default_factory=list)    # full import lines
     upstream: list[ExtraTask] = field(default_factory=list)
     downstream: list[ExtraTask] = field(default_factory=list)
-    outlets: list[str] = field(default_factory=list)    # extra Dataset URIs
+    outlets: list[str] = field(default_factory=list)    # extra Asset URIs
     diagnostics: list[tuple[str, str, str, str]] = field(default_factory=list)
     # ^ (level, code, message, subject) — merged into PartitionResult by emit
 
@@ -227,7 +228,7 @@ def _build_dummy(job: Job, ctx: RegistryContext) -> TaskPlan:
         entry="dummy",
         status=FULL,
         operator="EmptyOperator",
-        imports=["from airflow.operators.empty import EmptyOperator"],
+        imports=["from airflow.providers.standard.operators.empty import EmptyOperator"],
     )
 
 
@@ -382,7 +383,7 @@ REGISTRY: list[RegistryEntry] = [
         ctm_type="TASKTYPE=Dummy or synthetic __FOLDER_START__/__FOLDER_END__",
         status=FULL,
         operator="EmptyOperator",
-        imports=("from airflow.operators.empty import EmptyOperator",),
+        imports=("from airflow.providers.standard.operators.empty import EmptyOperator",),
         matches=lambda job, ctx: job.synthetic or (job.task_type or "") == "Dummy",
         build=_build_dummy,
     ),
@@ -560,7 +561,11 @@ def _apply_resources(plan: TaskPlan, job: Job, ctx: RegistryContext) -> None:
 def _apply_notifications(
     plan: TaskPlan, job: Job, ctx: RegistryContext, task_id: str
 ) -> None:
-    """ON/DO actions + SHOUTs -> callbacks, email, TriggerDagRun, outlets, SLA."""
+    """ON/DO actions + SHOUTs -> callbacks, email, TriggerDagRun, outlets.
+
+    SHOUT WHEN LATE no longer maps to ``sla`` (removed in Airflow 3.0) — see
+    :func:`_apply_sla` for the TODO + ``SLA_AF3_REMOVED`` path.
+    """
     notify_used = False
 
     def _use_notify(dest: str, message: str, is_domail: bool, label: str) -> None:
@@ -613,7 +618,7 @@ def _apply_notifications(
                     uri = f"ctrlm://cond/{name}"
                     if uri not in plan.outlets:
                         plan.comments.append(
-                            f"# ON {on.stmt} {on.code} DOCOND ADD -> Dataset outlet {uri}"
+                            f"# ON {on.stmt} {on.code} DOCOND ADD -> Asset outlet {uri}"
                         )
                         plan.outlets.append(uri)
                 else:
@@ -669,7 +674,7 @@ def _apply_forcejob(
             operator="TriggerDagRunOperator",
             kwargs={"trigger_dag_id": dag_id, "trigger_rule": trigger_rule},
             imports=[
-                "from airflow.operators.trigger_dagrun import TriggerDagRunOperator"
+                "from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator"
             ],
             comments=comments,
             relation="downstream",
@@ -678,31 +683,38 @@ def _apply_forcejob(
 
 
 def _apply_sla(plan: TaskPlan, job: Job, dest: str) -> None:
-    """SHOUT WHEN LATE -> sla=timedelta(TIMETO - TIMEFROM), an approximation."""
+    """SHOUT WHEN LATE: Airflow 3.0 REMOVED the ``sla`` parameter (V6-1).
+
+    No ``sla=`` is emitted anymore — the late window (TIMETO - TIMEFROM, the
+    old sla approximation) survives as a TODO comment pointing at Deadline
+    Alerts (Airflow 3.1+) plus a PARTIAL diagnostic ``SLA_AF3_REMOVED``.
+    """
     if job.timeto and job.timefrom and len(job.timeto) >= 4 and len(job.timefrom) >= 4:
         minutes = (_minutes(job.timeto) - _minutes(job.timefrom)) % 1440
         plan.comments.append(
-            f"# SHOUT WHEN LATE ({dest}) -> sla approximation: TIMETO - TIMEFROM"
+            "# TODO Airflow 3 removed SLAs; map to Deadline Alerts (3.1+): "
+            f"late after {minutes}m"
         )
-        plan.kwargs["sla"] = Raw(f"timedelta(minutes={minutes})")
-        plan.imports.append("from datetime import timedelta")
         plan.diagnostics.append(
             (
                 "warn",
-                "SLA_APPROX",
-                f"SHOUT WHEN LATE approximated as sla=timedelta(minutes={minutes})",
+                "SLA_AF3_REMOVED",
+                f"SHOUT WHEN LATE ({dest}) on {job.name}: Airflow 3 removed "
+                f"SLAs — map to a Deadline Alert (late after {minutes}m)",
                 job.uid,
             )
         )
     else:
         plan.comments.append(
-            "# TODO SHOUT WHEN LATE: no TIMETO window — sla not derivable"
+            "# TODO Airflow 3 removed SLAs; map to Deadline Alerts (3.1+): "
+            "late window not derivable (no TIMETO)"
         )
         plan.diagnostics.append(
             (
                 "warn",
-                "SLA_APPROX",
-                "SHOUT WHEN LATE has no TIMETO window; sla not emitted",
+                "SLA_AF3_REMOVED",
+                f"SHOUT WHEN LATE ({dest}) on {job.name}: Airflow 3 removed "
+                "SLAs and the job has no TIMETO window — late window unknown",
                 job.uid,
             )
         )

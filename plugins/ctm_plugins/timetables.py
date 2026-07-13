@@ -24,6 +24,8 @@ import yaml
 from ._odate import parse_hhmm
 
 try:  # airflow is only present on the scheduler/worker (MWAA), never on dev
+    # Path verified UNCHANGED in Airflow 3 (airflow.timetables.base), so this
+    # single guard covers both the 2.x fallback and the 3.x target (V6-2).
     from airflow.timetables.base import DagRunInfo, DataInterval, TimeRestriction, Timetable
 
     _HAS_AIRFLOW = True

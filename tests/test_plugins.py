@@ -2,8 +2,9 @@
 
 Pure-logic modules (_odate, callbacks, timetables helpers, _params) are
 unit-tested for real; airflow-importing files (operators.py, sensors.py,
-ctm_plugin.py) are only syntax-checked with py_compile — Airflow is NOT
-installed on this platform and must never be imported here.
+_compat.py, ctm_plugin.py) are only syntax-checked with py_compile — Airflow
+is NOT installed on this platform and must never be imported here. The V6-2
+Airflow 3 / 2.x compat shim (_compat.py) is asserted on textually.
 """
 from __future__ import annotations
 
@@ -448,6 +449,71 @@ def test_package_lazily_reexports_operator_classes():
     assert "airflow" not in sys.modules
 
 
+# --------------------------------------- Airflow 3 / 2.x compat shim (V6-2)
+
+def _plugin_source(name: str) -> str:
+    return (REPO / "plugins" / "ctm_plugins" / name).read_text(encoding="utf-8")
+
+
+def test_compat_shim_tries_airflow3_then_falls_back_to_2x():
+    # _compat.py imports airflow at module level, so (like operators.py) it
+    # can only be asserted on TEXTUALLY here: Airflow 3 canonical path first,
+    # 2.x path inside an `except ImportError` fallback.
+    src = _plugin_source("_compat.py")
+    pairs = [
+        ("from airflow.sdk import BaseOperator",
+         "from airflow.models.baseoperator import BaseOperator"),
+        ("from airflow.sdk import BaseSensorOperator",
+         "from airflow.sensors.base import BaseSensorOperator"),
+        ("from airflow.sdk import Variable",
+         "from airflow.models import Variable"),
+    ]
+    for canonical, fallback in pairs:
+        assert canonical in src, canonical
+        assert fallback in src, fallback
+        # the 3.x canonical import must come FIRST (it is the target)
+        assert src.index(canonical) < src.index(fallback)
+    # one try/except ImportError block per shimmed name
+    assert src.count("except ImportError") >= len(pairs)
+    assert '__all__ = ["BaseOperator", "BaseSensorOperator", "Variable"]' in src
+
+
+def test_wrapper_modules_import_airflow_bases_via_compat_shim():
+    ops = _plugin_source("operators.py")
+    assert "from ._compat import BaseOperator" in ops
+    assert "from airflow.models.baseoperator import" not in ops
+    # common.sql provider path is unchanged in Airflow 3 — imported directly
+    assert "from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator" in ops
+
+    sens = _plugin_source("sensors.py")
+    assert "from ._compat import BaseSensorOperator, Variable" in sens
+    assert "from airflow.sensors.base import" not in sens
+    assert "from airflow.models import Variable" not in sens
+    # Variable.get default must be POSITIONAL: the kwarg was renamed in
+    # Airflow 3 (2.x default_var= -> 3.x default=)
+    assert "Variable.get(key, default_var" not in sens
+    assert 'Variable.get(key, "")' in sens
+    # hook provider paths (unchanged in 3.x) stay late-imported in poke()
+    assert "from airflow.providers.amazon.aws.hooks.s3 import S3Hook" in sens
+    assert "from airflow.providers.sftp.hooks.sftp import SFTPHook" in sens
+
+
+def test_compat_shim_scope_is_exactly_the_moved_names():
+    # AirflowPlugin, Timetable and the provider classes were VERIFIED
+    # unchanged in Airflow 3 — they must keep their direct imports and stay
+    # out of the shim.
+    compat = _plugin_source("_compat.py")
+    for not_shimmed in ("plugins_manager", "timetables.base", "providers."):
+        assert not_shimmed not in "".join(
+            line for line in compat.splitlines()
+            if line.strip().startswith(("from ", "import "))
+        )
+    plugin = (REPO / "plugins" / "ctm_plugin.py").read_text(encoding="utf-8")
+    assert "from airflow.plugins_manager import AirflowPlugin" in plugin
+    tt = _plugin_source("timetables.py")
+    assert "from airflow.timetables.base import" in tt
+
+
 # ------------------------------------------------- airflow wrappers compile
 
 @pytest.mark.parametrize(
@@ -455,6 +521,7 @@ def test_package_lazily_reexports_operator_classes():
     [
         "plugins/ctm_plugin.py",
         "plugins/ctm_plugins/__init__.py",
+        "plugins/ctm_plugins/_compat.py",
         "plugins/ctm_plugins/_odate.py",
         "plugins/ctm_plugins/_params.py",
         "plugins/ctm_plugins/callbacks.py",

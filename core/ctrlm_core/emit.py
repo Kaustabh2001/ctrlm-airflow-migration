@@ -1,4 +1,4 @@
-r"""DAG file emitter — one Airflow 2.9+ (MWAA) file per DagSpec.
+r"""DAG file emitter — one Airflow 3 (MWAA) file per DagSpec.
 
 Implements the emit.py contract in docs/impl-contracts.md, the V2-3
 operator-mapping delta, and the V3-3 registry integration
@@ -6,7 +6,7 @@ operator-mapping delta, and the V3-3 registry integration
 job-type registry in ``operator_registry.py`` (single source of truth, first
 match wins, catch-all MANUAL stub last) and the full param-by-param Control-M
 -> Airflow mapping (retries, retry_delay, doc_md, priority_weight, CONFIRM
-gates, pools, params, ON/DO actions, SLA...) is applied to EVERY task via
+gates, pools, params, ON/DO actions...) is applied to EVERY task via
 ``operator_registry.apply_common_params``. The user-facing description of the
 whole mapping is docs/job-mapping-catalog.md.
 
@@ -29,6 +29,17 @@ code also records a task-level plan of every generated DAG into
 folder_start/folder_end, source_uid, task_group, upstream edges mirroring the
 emitted ``>>`` dependencies, outlets, external waits, schedule/dataset info).
 Purely additive — the rendered .py output is byte-identical to v4.
+
+V6-1 (docs/impl-contracts-v6.md): generated files use the Airflow 3 authoring
+style — a ``@dag(...)``-decorated function per DAG (function name = dag_id)
+plus a module-bottom call, with operators still instantiated as objects inside
+the function (``@task`` is only for Python callables). Authoring imports come
+from ``airflow.sdk`` (``dag``, ``TaskGroup``, ``Asset``); the core operators
+that moved to the standard provider in 3.x import from
+``airflow.providers.standard.*``. Datasets are Assets everywhere
+(``airflow.datasets`` is gone), and the ``sla`` parameter no longer exists —
+SHOUT WHEN LATE becomes a TODO comment + ``SLA_AF3_REMOVED`` diagnostic (see
+operator_registry). The dag_plans.json schema is unchanged.
 
 Airflow is NEVER imported here — it only appears in the *generated* code text
 (including imports from the write-once ``ctm_plugins`` package deployed to
@@ -328,7 +339,7 @@ def _schedule_repr(spec: DagSpec) -> str:
     if spec.dataset_triggered:
         uris = sorted(set(spec.datasets))
         if uris:
-            return "[" + ", ".join(f'Dataset("{u}")' for u in uris) + "]"
+            return "[" + ", ".join(f'Asset("{u}")' for u in uris) + "]"
         return "None"
     if spec.schedule:
         return f'"{spec.schedule}"'
@@ -399,12 +410,13 @@ def _task_lines(
     imports.update(tplan.imports)
     _record_task(rec, task_id, _job_kind(job), tplan.operator, uid, info["group"])
 
-    # dataset outlets: cross-link producer outlets + DOCOND ADD extras
+    # asset outlets: cross-link producer outlets + DOCOND ADD extras
+    # (Airflow 3: Datasets were renamed Assets; airflow.datasets is gone)
     uris = sorted(set(outlets.get(uid, [])) | set(tplan.outlets))
     if uris:
-        imports.add("from airflow.datasets import Dataset")
+        imports.add("from airflow.sdk import Asset")
         tplan.kwargs["outlets"] = Raw(
-            "[" + ", ".join(f'Dataset("{u}")' for u in uris) + "]"
+            "[" + ", ".join(f'Asset("{u}")' for u in uris) + "]"
         )
         for u in uris:
             rec["outlets"].append({"task_id": task_id, "dataset": u})
@@ -443,7 +455,7 @@ def _render_dag(
     used_vars: set[str] = set()
     rec = _new_dag_record(spec)
 
-    # ---- dataset outlets (this dag is PRODUCER) / consumer-side sensor links
+    # ---- asset outlets (this dag is PRODUCER) / consumer-side sensor links
     outlets: dict[str, list[str]] = {}
     consumer_links: list[CrossLink] = []
     links = sorted(result.cross_links, key=lambda l: (l.source, l.target, l.kind))
@@ -469,7 +481,7 @@ def _render_dag(
     # ---- task declarations, grouped per folder when the dag spans >1 folder
     body: list[str] = []
     if plan["use_groups"]:
-        imports.add("from airflow.utils.task_group import TaskGroup")
+        imports.add("from airflow.sdk import TaskGroup")
         for folder in plan["folders"]:
             gid = plan["group_ids"][folder]
             body.append(f'with TaskGroup(group_id="{gid}"):')
@@ -517,7 +529,9 @@ def _render_dag(
                 continue
             if rel_minutes(job.timefrom, config.new_day_time) <= anchor_rel:
                 continue
-            imports.add("from airflow.sensors.date_time import DateTimeSensorAsync")
+            imports.add(
+                "from airflow.providers.standard.sensors.date_time import DateTimeSensorAsync"
+            )
             gate_id = plan["ids"].claim(f"gate_{plan['tasks'][uid]['task_id']}")
             gate_var = _var_name(gate_id, used_vars)
             days = 1 if int(job.timefrom) < int(spec.anchor) else 0
@@ -531,9 +545,12 @@ def _render_dag(
                 "# gate target on the Control-M ODATE clock — same semantics as"
                 " ctm_plugins._odate.gate_target"
             )
+            # v6 correction (verified against the Airflow 3 standard-provider
+            # docs): the kwarg is `target_time` (templated str | datetime) —
+            # DateTimeSensor(Async) never had a `target_datetime` parameter.
             body.append(
                 f'{gate_var} = DateTimeSensorAsync(task_id="{gate_id}", '
-                f'target_datetime="{target}")'
+                f'target_time="{target}")'
             )
             body.append(f"{gate_var} >> {var_of[uid]}")
             body.append("")
@@ -542,7 +559,9 @@ def _render_dag(
 
     # ---- cross-DAG links where this dag is the CONSUMER (sensor mechanisms)
     for link in consumer_links:
-        imports.add("from airflow.sensors.external_task import ExternalTaskSensor")
+        imports.add(
+            "from airflow.providers.standard.sensors.external_task import ExternalTaskSensor"
+        )
         src_dag = result.assignments.get(link.source, "")
         src_plan = plans.get(src_dag)
         if src_plan is not None and link.source in src_plan["tasks"]:
@@ -565,6 +584,12 @@ def _render_dag(
         )
         if link.mechanism == WIRE_PREV:
             body.append("# TODO align to previous run (PREV-qualified condition)")
+        # Airflow 3 signature verified: ExternalTaskSensor aligns runs on the
+        # same logical_date by default (execution_delta/execution_date_fn are
+        # unchanged in 3.x); the emitted sensor relies on that default.
+        body.append(
+            "# aligns on the same logical_date (ExternalTaskSensor default)"
+        )
         body.append(
             f'{wait_var} = ExternalTaskSensor(task_id="{wait_id}", '
             f'external_dag_id="{src_dag}", external_task_id="{ext_task}", '
@@ -587,13 +612,19 @@ def _render_dag(
 
     # ---- imports: only what the generated file uses, deterministic order
     if spec.dataset_triggered and spec.datasets:
-        imports.add("from airflow.datasets import Dataset")
+        imports.add("from airflow.sdk import Asset")
     needs_timedelta = "from datetime import timedelta" in imports
     imports.discard("from datetime import timedelta")
-    import_lines = ["from airflow import DAG"]
-    import_lines += sorted(
-        l for l in imports if l.startswith("from airflow") and l != "from airflow import DAG"
-    )
+    # authoring imports come from airflow.sdk (Airflow 3): merge every
+    # `from airflow.sdk import <name>` request into ONE sorted line with `dag`
+    sdk_prefix = "from airflow.sdk import "
+    sdk_names = {"dag"}
+    for l in list(imports):
+        if l.startswith(sdk_prefix):
+            sdk_names.add(l[len(sdk_prefix):].strip())
+            imports.discard(l)
+    import_lines = [sdk_prefix + ", ".join(sorted(sdk_names))]
+    import_lines += sorted(l for l in imports if l.startswith("from airflow"))
     import_lines += sorted(l for l in imports if l.startswith("from ctm_plugins"))
     import_lines += sorted(
         l
@@ -668,7 +699,7 @@ def emit_dags(
     Deterministic: dags rendered in sorted dag_id order; every inner loop is
     sorted. Appends registry/param-mapping diagnostics (UNMAPPED_NODE,
     UNRESOLVED_AUTOEDIT, UNSUPPORTED_TYPE, MULTI_RESOURCE, FORCEJOB_UNRESOLVED,
-    SLA_APPROX, UNMAPPED_ACTION) to ``result.diagnostics`` as it goes, and
+    SLA_AF3_REMOVED, UNMAPPED_ACTION) to ``result.diagnostics`` as it goes, and
     writes the pools collected from QUANTITATIVE/CONTROL resources to
     ``<scope>/config/pools.json`` (sibling of the dags directory).
 

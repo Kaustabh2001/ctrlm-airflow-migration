@@ -5,12 +5,17 @@
 {{ imp }}
 {% endfor %}
 
-with DAG(
+
+@dag(
     dag_id="{{ dag_id }}",
+    schedule={{ schedule_repr }},
     start_date=datetime(2026, 1, 1),
     catchup=False,
-    schedule={{ schedule_repr }},
     default_args={"retries": {{ retries }}},
     tags={{ tags_repr }},
-) as dag:
+)
+def {{ dag_id }}():
 {{ body }}
+
+
+{{ dag_id }}()

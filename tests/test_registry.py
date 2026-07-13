@@ -85,6 +85,34 @@ def test_registry_rows_and_order():
     assert operators["unsupported"] == "CtmManualJob"
 
 
+def test_registry_imports_use_airflow3_paths():
+    """V6-1: EmptyOperator comes from the standard provider; no registry row
+    imports from the removed 2.x core paths (airflow.operators / .sensors)."""
+    imports = {e.name: e.imports for e in REGISTRY}
+    assert imports["dummy"] == (
+        "from airflow.providers.standard.operators.empty import EmptyOperator",
+    )
+    for entry in REGISTRY:
+        for imp in entry.imports:
+            assert not imp.startswith("from airflow.operators."), (entry.name, imp)
+            assert not imp.startswith("from airflow.sensors."), (entry.name, imp)
+            assert "airflow.datasets" not in imp, (entry.name, imp)
+
+
+def test_doforcejob_trigger_import_is_standard_provider():
+    job = _job(
+        task_type="Command",
+        command="x",
+        on_actions=[
+            OnAction(code="NOTOK", actions=[{"type": "DOFORCEJOB", "JOBNAME": "N"}])
+        ],
+    )
+    plan, _ = _plan(job, _ctx(assignments={"F/N": "n"}))
+    assert plan.downstream[0].imports == [
+        "from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator"
+    ]
+
+
 def test_catch_all_is_last_and_matches_anything():
     last = REGISTRY[-1]
     assert last.name == "unsupported"
@@ -480,8 +508,11 @@ def test_docond_add_becomes_dataset_outlet():
     assert "UNMAPPED_ACTION" in {d[1] for d in plan.diagnostics}  # the DEL
 
 
-def test_shout_late_sla_approximation():
+def test_shout_late_airflow3_todo_and_diagnostic():
+    """V6-1: Airflow 3 removed sla — SHOUT WHEN LATE emits a Deadline-Alerts
+    TODO naming the late window + SLA_AF3_REMOVED, never an sla kwarg."""
     job = _job(
+        name="SETTLE",
         task_type="Command",
         command="x",
         timefrom="1900",
@@ -489,8 +520,15 @@ def test_shout_late_sla_approximation():
         shouts=[{"when": "LATE", "dest": "OPS", "message": "late"}],
     )
     plan, _ = _plan(job)
-    assert plan.kwargs["sla"] == Raw("timedelta(minutes=240)")
-    assert ("SLA_APPROX", job.uid) in {(d[1], d[3]) for d in plan.diagnostics}
+    assert "sla" not in plan.kwargs
+    assert (
+        "# TODO Airflow 3 removed SLAs; map to Deadline Alerts (3.1+): "
+        "late after 240m" in plan.comments
+    )
+    diags = {(d[1], d[3]) for d in plan.diagnostics}
+    assert ("SLA_AF3_REMOVED", job.uid) in diags
+    message = next(d[2] for d in plan.diagnostics if d[1] == "SLA_AF3_REMOVED")
+    assert "SETTLE" in message and "240m" in message  # names job + late window
 
 
 def test_shout_late_without_timeto_flags_only():
@@ -502,8 +540,11 @@ def test_shout_late_without_timeto_flags_only():
     )
     plan, _ = _plan(job)
     assert "sla" not in plan.kwargs
-    assert "SLA_APPROX" in {d[1] for d in plan.diagnostics}
-    assert any("TODO SHOUT WHEN LATE" in c for c in plan.comments)
+    assert "SLA_AF3_REMOVED" in {d[1] for d in plan.diagnostics}
+    assert any(
+        "TODO Airflow 3 removed SLAs" in c and "no TIMETO" in c
+        for c in plan.comments
+    )
 
 
 def test_unmapped_do_actions_get_todo_and_diagnostic():

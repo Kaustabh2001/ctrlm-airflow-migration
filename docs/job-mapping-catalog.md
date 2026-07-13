@@ -1,10 +1,21 @@
 # Control-M → Airflow job-mapping catalog
 
 The complete, param-by-param mapping of Control-M job definitions to Airflow
-(2.9+/MWAA), exactly as implemented by the job-type registry
+(3.x / MWAA), exactly as implemented by the job-type registry
 (`core/ctrlm_core/operator_registry.py`) and applied by the DAG emitter
 (`core/ctrlm_core/emit.py`). Custom components are written ONCE in the
 `plugins/ctm_plugins` package and reused by every generated DAG.
+
+**Airflow 3 target (v6).** Generated DAGs use the Airflow 3 authoring style: a
+`@dag(...)`-decorated function per DAG (function name = dag_id) plus a
+module-bottom call — operators are still instantiated as objects inside the
+function (`@task` is only for Python callables, which converted Control-M jobs
+are not). Authoring imports come from `airflow.sdk` (`dag`, `TaskGroup`,
+`Asset`); `EmptyOperator`, `TriggerDagRunOperator`, `ExternalTaskSensor` and
+`DateTimeSensorAsync` import from their `airflow.providers.standard.*` paths.
+Datasets were renamed **Assets** in 3.0 (`airflow.datasets` is gone), and the
+task-level `sla` parameter was **removed** — see the `SHOUT WHEN=LATE` row
+in §2.
 
 This document is kept in sync with the code by `tests/test_registry.py`: the
 registry row names in the marker block below must match
@@ -37,7 +48,7 @@ CODEGEN time (§2) — no blanket wrapper classes.
 
 | # | Registry row | Control-M type matched | Airflow operator | Status | Notes |
 |---|---|---|---|---|---|
-| 1 | `dummy` | `TASKTYPE=Dummy` or synthetic `__FOLDER_START__` / `__FOLDER_END__` | `EmptyOperator` | FULL | Synthetic nodes carry folder schedule / fan-in semantics. |
+| 1 | `dummy` | `TASKTYPE=Dummy` or synthetic `__FOLDER_START__` / `__FOLDER_END__` | `EmptyOperator` (`airflow.providers.standard.operators.empty`) | FULL | Synthetic nodes carry folder schedule / fan-in semantics. |
 | 2 | `filewatch` | `TASKTYPE=FileWatch` or `APPL_TYPE=FILEWATCH` | `ctm_plugins.sensors.CtmFileWatcherSensor(path=<command>, mode="reschedule", poke_interval=60, timeout=<MAXWAIT>)` | FULL | Path taken from the job command (AUTOEDIT-translated); supports local paths, `s3://`, `sftp://`. A TODO comment is emitted when the export carries no path. |
 | 3 | `database` | `APPL_TYPE=DATABASE` | `ctm_plugins.operators.CtmDatabaseJob(node=<NODEID>, sql=<command>)` | FULL | Custom operator (subclass of `SQLExecuteQueryOperator`, provider `apache-airflow-providers-common-sql`): `node` resolves to the Airflow connection at PARSE time via the `nodes.yaml` shipped in `plugins.zip` (entry should carry `type: db`; an explicit `conn_id` kwarg overrides) — no connection literal is baked into the DAG file. SQL goes through the AUTOEDIT translator (`%%ODATE` → `{{ ds_nodash }}`). PARTIAL (diagnostic `UNMAPPED_NODE`) when the NODEID is not in the codegen-side `nodes.yaml` — map it with `type: db`. Common params (§2) are still translated inline at codegen time; the operator only owns connectivity. |
 | 4 | `file_transfer` | `APPL_TYPE` in `FILE_TRANS`, `AFT`, `MFT` | MANUAL stub (`ctm_plugins.operators.CtmManualJob(ctm_task_type=..., ctm_appl_type=..., ctm_job=...)` → `NotImplementedError`) | MANUAL | Transfer direction and endpoints need humans. The stub is preceded by comments naming the source/target hints (NODEID, RUN_AS, DESCRIPTION, variables). Diagnostic `UNSUPPORTED_TYPE`. See §6 for the AFT/MFT roadmap. |
@@ -57,7 +68,7 @@ CODEGEN time (§2) — no blanket wrapper classes.
 | `MAXRERUN` | task-level `retries` (and DAG `default_args.retries` = max over members) | Only emitted per task when > 0. |
 | `RERUNINTERVAL` | `retry_delay=timedelta(minutes=<n>)` | |
 | `MAXWAIT` (days) | sensor `timeout` (`MAXWAIT * 86400` s, default 21600) | Applies to `ExternalTaskSensor` waits and `CtmFileWatcherSensor`. |
-| `TIMEFROM` | upstream `DateTimeSensorAsync` time gate | Gate targets are computed on the Control-M ODATE clock (New Day = `0600` by default) — same semantics as `ctm_plugins._odate.gate_target`; a comment in the generated code references it. |
+| `TIMEFROM` | upstream `DateTimeSensorAsync` time gate (`airflow.providers.standard.sensors.date_time`, kwarg `target_time`) | Gate targets are computed on the Control-M ODATE clock (New Day = `0600` by default) — same semantics as `ctm_plugins._odate.gate_target`; a comment in the generated code references it. |
 | `PRIORITY` (`AA` highest .. `ZZ` lowest) | `priority_weight` | Formula: `idx = (c0-'A')*26 + (c1-'A')` (AA=0 .. ZZ=675), `priority_weight = 100 - round(idx * 99 / 675)` — linear onto 1..100, `AA`→100, `ZZ`→1. Purely numeric priorities are clamped into 1..100. |
 | `CRITICAL=1` | `priority_weight` floored at 90 | A comment marks the floor; combines with `PRIORITY` (max wins). |
 | `CONFIRM=1` | upstream `ctm_plugins.sensors.CtmApprovalGateSensor` task `confirm_<task_id>` | Approve a run by setting Airflow Variable `ctm_approve/<dag_id>/<task_id>/<ds>` to `yes`. |
@@ -65,15 +76,19 @@ CODEGEN time (§2) — no blanket wrapper classes.
 | `CONTROL NAME=<R> TYPE=E` | `pool="<R>"` with 1 slot | Exclusive control = a 1-slot pool (`source: "control"` in pools.json). Shared (`TYPE=S`) controls get a NOTE comment only. |
 | `VARIABLE NAME=... VALUE=...` | task-level `params={...}` | Literal dict, sorted by name; folder variables were already merged in (job wins). |
 | `ON CODE=NOTOK` + `DOMAIL` / `DOSHOUT`, or `SHOUT WHEN=NOTOK` | `on_failure_callback=ctm_shout(dest=..., message=...)` | From `ctm_plugins.callbacks`; destination resolution via `mapping-config/notify.yaml`. A `DOMAIL` DEST containing `@` additionally sets `email=[...]` and `email_on_failure=True`. Only the first NOTOK notification becomes the callback; extras get a TODO + `UNMAPPED_ACTION`. |
-| `ON ... DOFORCEJOB JOBNAME=<J>` | downstream `TriggerDagRunOperator` task `force_<j>` | `trigger_rule="one_failed"` for NOTOK codes, `"all_success"` for OK. `trigger_dag_id` resolved through this run's assignments when `<J>` is in scope; otherwise the literal `snake_case(<J>)` plus a WARN diagnostic `FORCEJOB_UNRESOLVED`. |
-| `ON ... DOCOND NAME=<C> SIGN=ADD` | extra Dataset outlet `ctrlm://cond/<C>` | Merged with the cross-link outlets on the task. `SIGN=DEL` is unmapped (TODO + `UNMAPPED_ACTION`). |
-| `SHOUT WHEN=LATE` | `sla=timedelta(TIMETO − TIMEFROM)` | An approximation, flagged `SLA_APPROX`; when the job has no `TIMETO` window the SLA cannot be derived (TODO comment + `SLA_APPROX`). |
+| `ON ... DOFORCEJOB JOBNAME=<J>` | downstream `TriggerDagRunOperator` task `force_<j>` (`airflow.providers.standard.operators.trigger_dagrun`) | `trigger_rule="one_failed"` for NOTOK codes, `"all_success"` for OK. `trigger_dag_id` resolved through this run's assignments when `<J>` is in scope; otherwise the literal `snake_case(<J>)` plus a WARN diagnostic `FORCEJOB_UNRESOLVED`. |
+| `ON ... DOCOND NAME=<C> SIGN=ADD` | extra Asset outlet `ctrlm://cond/<C>` | Merged with the cross-link outlets on the task (`outlets=[Asset(...)]`, `from airflow.sdk import Asset`). `SIGN=DEL` is unmapped (TODO + `UNMAPPED_ACTION`). |
+| `SHOUT WHEN=LATE` | `# TODO Airflow 3 removed SLAs; map to Deadline Alerts (3.1+): late after <n>m` comment | Airflow 3.0 removed the task-level `sla` parameter, so nothing executable is emitted. `<n>` = `TIMETO − TIMEFROM` minutes (the old sla approximation); when the job has no `TIMETO` the window is reported as not derivable. Always flagged with a PARTIAL diagnostic `SLA_AF3_REMOVED` naming the job and the late window. |
 | any other `ON`/`DO` action (`DOSTOPCYCLIC`, `DO_IFRERUN`, `DOACTION`, ...) | `# TODO unmapped ON/DO action ...` comment | WARN diagnostic `UNMAPPED_ACTION`. |
 | `CMDLINE` / `MEMLIB/MEMNAME` `%%`-variables | AUTOEDIT translation | `%%ODATE`→`{{ ds_nodash }}`, `%%$ODATE`→`{{ ds }}`, `%%DATE`→`{{ ds_nodash }}`, `%%TIME`→`{{ ts_nodash }}`, `%%JOBNAME`→ literal job name; unknown tokens stay verbatim (TODO + `UNRESOLVED_AUTOEDIT`). |
 
-Scheduling (`WEEKDAYS`/`DAYS`/`MONTHS` → cron, cyclic jobs, dataset-triggered
-DAGs, cross-DAG sensors/datasets) is unchanged from v1/v2 — see
-`docs/operator-mapping.md`.
+Scheduling (`WEEKDAYS`/`DAYS`/`MONTHS` → cron, cyclic jobs, asset-triggered
+DAGs `schedule=[Asset(...)]`, cross-DAG sensors/assets) is unchanged from
+v1/v2 in substance — see `docs/operator-mapping.md` (which still uses the 2.x
+`Dataset` spelling; emitted code says `Asset`). `ExternalTaskSensor` waits
+import from `airflow.providers.standard.sensors.external_task` and keep the
+default logical-date alignment (`execution_delta`/`execution_date_fn` are
+unchanged in Airflow 3).
 
 ## 3. Custom components (`plugins/ctm_plugins`, written once, reused everywhere)
 
@@ -83,7 +98,7 @@ DAGs, cross-DAG sensors/datasets) is unchanged from v1/v2 — see
 | `ctm_plugins.operators.CtmManualJob` | every MANUAL registry row (`file_transfer`, `known_manual`, `unsupported`) | `execute()` raises `NotImplementedError` naming `ctm_task_type`, `ctm_appl_type` and `ctm_job` — loud, actionable, impossible to mistake for success. |
 | `ctm_plugins.sensors.CtmApprovalGateSensor` | `CONFIRM=1` approval gates | Pokes Airflow Variable `ctm_approve/<dag_id>/<task_id>/<ds>` == `yes`; mode `reschedule`, poke 60 s. |
 | `ctm_plugins.sensors.CtmFileWatcherSensor` | `FILEWATCH` jobs | Path scheme decides the check: local path / `s3://` (S3Hook) / `sftp://` (SFTPHook). |
-| `ctm_plugins.callbacks.ctm_shout` | `DOMAIL` / `DOSHOUT` / `SHOUT` notifications | Destination resolution via `mapping-config/notify.yaml` (email / sns / log; a dest containing `@` is email directly). Usable as `on_failure_callback`, `on_success_callback`, `sla_miss_callback`. |
+| `ctm_plugins.callbacks.ctm_shout` | `DOMAIL` / `DOSHOUT` / `SHOUT` notifications | Destination resolution via `mapping-config/notify.yaml` (email / sns / log; a dest containing `@` is email directly). Usable as `on_failure_callback`, `on_success_callback` (Airflow 3 removed `sla_miss_callback`). |
 | `ctm_plugins._odate.ctm_odate` / `gate_target` | Control-M ODATE semantics | The run's order date (fire time before New Day time belongs to the previous day) and time-gate targeting; registered as the `ctm_odate` macro. |
 | `ctm_plugins.timetables.CtmCalendarTimetable` | Control-M calendar schedules | Fires on exactly the dates listed in `mapping-config/calendars.yaml`. |
 | `plugins/ctm_plugin.py` (`CtmPlugin`) | Airflow plugin registration | Registers the macro and the timetable. |

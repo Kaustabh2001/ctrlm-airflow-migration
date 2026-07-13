@@ -83,7 +83,9 @@ dag_ids stay unique ACROSS scopes (one Airflow instance): a collision keeps the
 first scope's name and renames later ones to `<scope>__<dag_id>`, recorded in
 `scopes.json` under `dag_id_collisions`.
 
-Note: generated DAGs target Airflow 2.9+ / MWAA. Airflow itself is not installed
+Note: generated DAGs target Airflow 3 / MWAA (Airflow 3 authoring style:
+`@dag`-decorated function per DAG, `airflow.sdk` imports, Assets instead of
+Datasets, standard-provider operator paths). Airflow itself is not installed
 here (no native Windows support) — DagBag import validation happens later on
 `aws-mwaa-local-runner`. Sample XMLs in `examples/exports/` are synthetic, written
 in a classic DEFTABLE dialect; the parser gets adjusted against real exports in P0.
