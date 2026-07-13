@@ -41,9 +41,20 @@ pipeline run 2 ──► decisions applied deterministically; diagnostics record
 | `manual_job` | job uid | `operator_override {operator_import, kwargs}` \| `eliminate {reason}` \| `stay_manual` | emit (registry consults decisions as highest-precedence row) |
 | `utility_job` | job uid | `translate {to: trigger_dag\|variable_set\|callback\|asset_event, params}` \| `eliminate {reason}` \| `stay_manual` | emit |
 | `orphan_condition` | condition name | `external_asset {uri}` \| `ignore` \| `error` | partitioner/emit (Asset gate/schedule) |
-| `merge_dags` | [dag_ids] | merge (refused if day-patterns clash) | partitioner post-phase |
-| `cut_edge` | (source, target, cond) | force cut | partitioner (existing MANUAL cut kind, finally wired) |
-| `rename_dag` | dag_id | new name | partitioner naming (implements cluster-map pin read-back) |
+| `cut_edge` (HUMAN-only) | (source, target, cond) | force cut | partitioner (existing MANUAL cut kind, finally wired) |
+| `rename_dag` (HUMAN-only) | dag_id | new name | partitioner naming (implements cluster-map pin read-back) |
+
+**No free-form merge domain (user decision, 2026-07-09).** Merging happens only as a
+CONSEQUENCE of reclassification, never as a command: when `cyclic_mode:
+observer_sensor` applies, the job is no longer extracted into its own DAG — it
+clusters normally and the fragmented component reunites with the observer inside
+as a sensor task; when a utility job between two chains is `eliminate`d, edges
+contract through it and the pieces rejoin naturally. The partitioning algorithm
+remains the only authority on DAG boundaries. Consequently the AI advisor may
+propose ONLY reclassification domains (`cyclic_mode`, `manual_job`,
+`utility_job`, `orphan_condition`); structural entries (`cut_edge`,
+`rename_dag`) are accepted from humans only — AI-proposed structural entries
+are rejected at load with a diagnostic.
 
 ## Deterministic classifier (runs first; only the residue reaches the advisor)
 
@@ -112,16 +123,19 @@ decisions:
 - Auto-drafting DAG code for stay-manual jobs (possible v8: agent drafts into
   `manual_drafts/`, never into dags/).
 
-## Open questions for the user
+## Settled decisions (user, 2026-07-09)
 
-1. `apply_unapproved_ai` default: **true** (apply + loud diagnostics, fastest loop)
-   or **false** (nothing applies until a human flips `approved`)?
-2. `eliminate` rendering: drop the job entirely (tombstone in JSON only), or also
-   leave a commented-out block in the generated DAG file where it would have been?
-3. `merge_dags` across both strategies, or components-only (single-entry's
-   single-root guarantee makes merges semantically odd there)?
-4. New sample XML (`sample_wh.xml`) exercising observer-cyclic + utility jobs +
-   orphan — OK to add (merged-corpus test counts shift again)?
+1. `apply_unapproved_ai` = **true**: AI proposals apply immediately, with the
+   `AI_DECISION_APPLIED` diagnostic trail; humans veto by editing decisions.yaml.
+2. `eliminate` = the job **vanishes entirely** from the generated DAG (edges
+   contracted through it); the tombstone lives only in partition.json/diagnostics.
+3. **No free-form merges** — merge-as-consequence only (see the domain table
+   note). AI advisor is restricted to reclassification domains.
+4. Samples: the user cannot supply real exports; add a **complex synthetic**
+   sample exercising observer-cyclics, utility jobs, and orphans — and
+   additionally hunt public GitHub/community sources for a genuinely complex
+   real-world DEFTABLE export to include (license permitting) for parser
+   hardening.
 
 ## Verification plan (when approved)
 
